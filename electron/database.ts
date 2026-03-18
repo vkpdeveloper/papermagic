@@ -829,7 +829,7 @@ export function markChapterRefinementStatus(
     .run(status, chapterId);
 }
 
-export function resetDocumentRefinement(
+export function forceResetDocumentRefinement(
   context: DatabaseContext,
   documentId: string,
 ): void {
@@ -838,6 +838,18 @@ export function resetDocumentRefinement(
       "UPDATE chapters SET refinement_status = 'pending', refined_content_json = NULL WHERE document_id = ?",
     )
     .run(documentId);
+}
+
+export function isDocumentFullyRefined(
+  context: DatabaseContext,
+  documentId: string,
+): boolean {
+  const row = context.connection
+    .prepare(
+      `SELECT COUNT(*) as count FROM chapters WHERE document_id = ? AND refinement_status != 'done'`,
+    )
+    .get(documentId) as { count: number };
+  return row.count === 0;
 }
 
 export function resetStuckProcessingChapters(context: DatabaseContext): void {

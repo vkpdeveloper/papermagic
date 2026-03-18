@@ -23,7 +23,7 @@ import {
 import { importDocumentFromPath } from './importers'
 import { generateDocumentTitle, validateApiKey, PROVIDER_MODELS } from './ai'
 import type { AiProvider } from './ai'
-import { queueDocumentForRefinement } from './refinement'
+import { queueDocumentForRefinement, forceRequeueDocument } from './refinement'
 
 export interface LibraryStore {
   loadState: () => Promise<PersistedState>
@@ -162,7 +162,7 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
     getProviderModels: async (provider) => PROVIDER_MODELS[provider] ?? [],
     rerunRefinement: async (documentId) => {
       const settings = loadSettings(context)
-      queueDocumentForRefinement(context, documentId, settings)
+      forceRequeueDocument(context, documentId, settings)
     },
     getRefiningDocumentIds: async () => getRefiningDocumentIds(context),
   }

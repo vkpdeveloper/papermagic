@@ -8,7 +8,8 @@ import {
   getPendingRefinementChapters,
   saveRefinedChapter,
   markChapterRefinementStatus,
-  resetDocumentRefinement,
+  isDocumentFullyRefined,
+  forceResetDocumentRefinement,
   getAllChapterRowsForDocument,
   updateDocumentToc,
   type ChapterRefinementRow,
@@ -564,13 +565,35 @@ export function stopRefinementWorker(): void {
   activeAbortController = null;
 }
 
+// Force a full re-run regardless of current status — used by the manual "rerun" action in Settings.
+export function forceRequeueDocument(
+  context: DatabaseContext,
+  documentId: string,
+  settings: AppSettings,
+): void {
+  log(`force-requeueing document ${documentId}`);
+  forceResetDocumentRefinement(context, documentId);
+
+  if (!isRunning) {
+    startRefinementWorker(context, settings);
+  } else {
+    log("worker already running — reset chapters will be picked up in next batch");
+  }
+}
+
 export function queueDocumentForRefinement(
   context: DatabaseContext,
   documentId: string,
   settings: AppSettings,
 ): void {
+  // Skip if all chapters are already refined — prevents re-running on app restart
+  // or duplicate import calls. Only the explicit rerunRefinement path should force a reset.
+  if (isDocumentFullyRefined(context, documentId)) {
+    log(`document ${documentId} already fully refined — skipping`);
+    return;
+  }
+
   log(`queuing document ${documentId} for refinement`);
-  resetDocumentRefinement(context, documentId);
 
   if (!isRunning) {
     startRefinementWorker(context, settings);

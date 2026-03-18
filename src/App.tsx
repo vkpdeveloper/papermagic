@@ -1703,7 +1703,7 @@ function App() {
                 />
               </div>
               {filteredLibraryDocuments.length > 0 ? (
-                <div className="grid grid-cols-[repeat(auto-fill,240px)] justify-start gap-4 max-sm:grid-cols-2">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 max-sm:grid-cols-2">
                   {filteredLibraryDocuments.map((document) => {
                     const progress = persistedState.progress.find((item) => item.documentId === document.id)
                     const coverImageUrl = resolveDocumentCoverImage(document)
@@ -1778,7 +1778,7 @@ function App() {
                           <h3 className="m-0 min-w-0 overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:3] [display:-webkit-box] text-[1.08rem] font-display font-semibold leading-[1.08] tracking-[-0.03em]">
                             {document.title}
                           </h3>
-                          <div className="mt-auto pt-3 border-t border-border-subtle flex items-end justify-between gap-3 text-text-muted text-[0.72rem] tracking-[0.16em] uppercase">
+                          <div className="mt-auto pt-3 border-t border-border-subtle flex items-center justify-between gap-3 text-text-muted text-[0.72rem] tracking-[0.16em] uppercase">
                             <span>Progress</span>
                             <strong className="text-text-primary text-[0.95rem] font-display font-semibold tracking-[-0.02em] normal-case">
                               {progress ? formatPercent(progressValue) : 'Not started'}
