@@ -129,6 +129,7 @@ export interface PaperMagicApi {
   importPaths: (paths: string[]) => Promise<DocumentRecord[]>
   importUrl: (url: string) => Promise<DocumentRecord>
   removeDocument: (documentId: string) => Promise<void>
+  renameDocument: (documentId: string, title: string) => Promise<void>
   saveProgress: (progress: ReadingProgress) => Promise<void>
   savePreferences: (preferences: ReaderPreferences) => Promise<ReaderPreferences>
   addBookmark: (bookmark: BookmarkInput) => Promise<Bookmark>

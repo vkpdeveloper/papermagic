@@ -28,6 +28,7 @@ export interface LibraryStore {
   importPaths: (paths: string[]) => Promise<DocumentRecord[]>
   importUrl: (url: string) => Promise<DocumentRecord>
   removeDocument: (documentId: string) => Promise<void>
+  renameDocument: (documentId: string, title: string) => Promise<void>
   saveProgress: (progress: ReadingProgress) => Promise<void>
   savePreferences: (preferences: ReaderPreferences) => Promise<ReaderPreferences>
   addBookmark: (bookmark: BookmarkInput) => Promise<ReturnType<typeof buildBookmark>>
@@ -133,6 +134,16 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
 
       removeDocument(context, documentId)
       await fs.rm(resolveDocumentCacheDirectory(document, context.libraryRoot), { recursive: true, force: true })
+    },
+    renameDocument: async (documentId, title) => {
+      const state = loadState(context)
+      const document = state.documents.find((entry) => entry.id === documentId)
+
+      if (!document) {
+        return
+      }
+
+      upsertDocument(context, { ...document, title })
     },
     saveProgress: async (progress) => {
       saveProgress(context, progress)

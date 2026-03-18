@@ -25,7 +25,6 @@ import {
   PanelLeftOpen as PanelLeftOpenIcon,
   Search as SearchIcon,
   Settings as SettingsIcon,
-  Trash2 as TrashIcon,
   Upload as UploadIcon,
   X as XIcon,
 } from 'lucide-react'
@@ -44,6 +43,7 @@ import type {
   TocItem,
 } from './types'
 import { ConfirmDialog } from './components/ConfirmDialog'
+import { Dialog } from './components/ui/Dialog'
 import { DropOverlay } from './components/DropOverlay'
 import { ImageLightbox } from './components/ImageLightbox'
 import { SelectionPopover } from './components/SelectionPopover'
@@ -535,6 +535,7 @@ function App() {
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null)
   const [previewImage, setPreviewImage] = useState<ImagePreviewState | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null)
+  const [renameDialog, setRenameDialog] = useState<{ document: DocumentRecord; value: string } | null>(null)
   const [expandedTocChapters, setExpandedTocChapters] = useState<string[]>([])
   const [pageIndex, setPageIndex] = useState(0)
   const [pageCount, setPageCount] = useState(1)
@@ -1170,6 +1171,38 @@ function App() {
       confirmLabel: 'Remove',
       onConfirm: () => void handleRemoveDocumentConfirmed(document),
     })
+  }
+
+  const handleRenameDocument = async (document: DocumentRecord, title: string) => {
+    const trimmed = title.trim()
+    if (!trimmed || trimmed === document.title || !persistedState) {
+      return
+    }
+
+    setPersistedState((current) => {
+      if (!current) return current
+      return {
+        ...current,
+        documents: current.documents.map((doc) =>
+          doc.id === document.id ? { ...doc, title: trimmed } : doc
+        ),
+      }
+    })
+
+    try {
+      await window.paperMagic.renameDocument(document.id, trimmed)
+    } catch (error) {
+      setPersistedState((current) => {
+        if (!current) return current
+        return {
+          ...current,
+          documents: current.documents.map((doc) =>
+            doc.id === document.id ? { ...doc, title: document.title } : doc
+          ),
+        }
+      })
+      toast.error(error instanceof Error ? error.message : `Could not rename "${document.title}".`)
+    }
   }
 
   const handleRemoveDocumentConfirmed = async (document: DocumentRecord) => {
@@ -1878,6 +1911,11 @@ function App() {
                             label: 'Open',
                             onSelect: () => { if (!isDeletingDocument) openDocument(document.id) },
                           },
+                          {
+                            label: 'Rename',
+                            disabled: isDeletingDocument,
+                            onSelect: () => setRenameDialog({ document, value: document.title }),
+                          },
                           { type: 'separator' },
                           {
                             label: 'Remove from library',
@@ -1922,20 +1960,6 @@ function App() {
                             <p className="m-0 text-text-muted text-[0.72rem] tracking-[0.16em] uppercase">
                               {documentAuthorLabel(document)}
                             </p>
-                            <Tooltip content="Remove from library" side="top">
-                              <button
-                                type="button"
-                                className="inline-flex items-center min-h-0 p-0 border-0 bg-transparent text-white/[0.56] font-[inherit] cursor-pointer transition-colors duration-[160ms] hover:enabled:text-[#f3b3b3] disabled:cursor-default disabled:opacity-55"
-                                onClick={(event) => {
-                                  event.stopPropagation()
-                                  void handleRemoveDocument(document)
-                                }}
-                                disabled={isDeletingDocument}
-                                aria-label={`Remove ${document.title}`}
-                              >
-                                <TrashIcon size={14} strokeWidth={1.9} aria-hidden="true" />
-                              </button>
-                            </Tooltip>
                           </div>
                           <h3 className="m-0 min-w-0 overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:3] [display:-webkit-box] text-[1.08rem] font-display font-semibold leading-[1.08] tracking-[-0.03em]">
                             {document.title}
@@ -2375,6 +2399,52 @@ function App() {
 
       {confirmDialog ? (
         <ConfirmDialog dialog={confirmDialog} onDismiss={() => setConfirmDialog(null)} />
+      ) : null}
+
+      {renameDialog ? (
+        <Dialog
+          open={!!renameDialog}
+          onOpenChange={(open) => { if (!open) setRenameDialog(null) }}
+          title="Rename"
+          description="Enter a new title for the document."
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              const formData = new FormData(e.currentTarget)
+              const newTitle = formData.get('title') as string
+              if (newTitle && newTitle.trim()) {
+                handleRenameDocument(renameDialog.document, newTitle)
+                setRenameDialog(null)
+              }
+            }}
+            className="grid gap-4"
+          >
+            <input
+              autoFocus
+              name="title"
+              type="text"
+              defaultValue={renameDialog.value}
+              className="w-full min-h-12 px-4 border border-border-strong bg-[#040404] text-text-primary font-[inherit]"
+              placeholder="Document title"
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setRenameDialog(null)}
+                className="min-h-10 px-4 bg-transparent text-text-primary border border-border-subtle transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="min-h-10 px-4 bg-text-primary text-[#000] font-bold transition-[border-color,background,color] duration-[160ms] cursor-pointer border-0 font-[inherit]"
+              >
+                Save
+              </button>
+            </div>
+          </form>
+        </Dialog>
       ) : null}
 
       <SettingsPage open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
