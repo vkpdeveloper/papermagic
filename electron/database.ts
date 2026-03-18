@@ -1,8 +1,8 @@
-import fs from 'node:fs'
-import path from 'node:path'
-import Database from 'better-sqlite3'
-import { asc, desc, eq } from 'drizzle-orm'
-import { drizzle } from 'drizzle-orm/better-sqlite3'
+import fs from "node:fs";
+import path from "node:path";
+import Database from "better-sqlite3";
+import { desc, eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import type {
   AppSettings,
   Bookmark,
@@ -16,9 +16,9 @@ import type {
   ReaderPreferences,
   ReadingProgress,
   TocItem,
-} from '../src/types'
-import { flattenDocument } from '../src/content'
-import { defaultPreferences } from '../src/storage'
+} from "../src/types";
+import { flattenDocument } from "../src/content";
+import { defaultPreferences } from "../src/storage";
 import {
   bookmarksTable,
   chaptersTable,
@@ -28,82 +28,134 @@ import {
   progressTable,
   schema,
   settingsTable,
-} from './schema'
+} from "./schema";
 
 function parseJson<T>(value: string): T {
-  return JSON.parse(value) as T
+  return JSON.parse(value) as T;
 }
 
 function ensureDirectory(directory: string): void {
-  fs.mkdirSync(directory, { recursive: true })
+  fs.mkdirSync(directory, { recursive: true });
 }
 
 export interface DatabaseContext {
-  connection: Database.Database
-  db: ReturnType<typeof drizzle<typeof schema>>
-  dataRoot: string
-  libraryRoot: string
+  connection: Database.Database;
+  db: ReturnType<typeof drizzle<typeof schema>>;
+  dataRoot: string;
+  libraryRoot: string;
 }
 
-function tableHasColumn(connection: Database.Database, tableName: string, columnName: string): boolean {
-  const columns = connection.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
-  return columns.some((column) => column.name === columnName)
+function tableHasColumn(
+  connection: Database.Database,
+  tableName: string,
+  columnName: string,
+): boolean {
+  const columns = connection
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all() as Array<{ name: string }>;
+  return columns.some((column) => column.name === columnName);
 }
 
-function readCoverImageUrlFromMetadataJson(metadataJson: string): string | null {
+function readCoverImageUrlFromMetadataJson(
+  metadataJson: string,
+): string | null {
   try {
-    const metadata = JSON.parse(metadataJson) as DocumentMetadata
-    return typeof metadata.coverImageUrl === 'string' && metadata.coverImageUrl.length > 0 ? metadata.coverImageUrl : null
+    const metadata = JSON.parse(metadataJson) as DocumentMetadata;
+    return typeof metadata.coverImageUrl === "string" &&
+      metadata.coverImageUrl.length > 0
+      ? metadata.coverImageUrl
+      : null;
   } catch {
-    return null
+    return null;
   }
 }
 
 function ensureDocumentCoverImageColumn(connection: Database.Database): void {
-  if (!tableHasColumn(connection, 'documents', 'cover_image_url')) {
-    connection.exec('ALTER TABLE documents ADD COLUMN cover_image_url TEXT;')
+  if (!tableHasColumn(connection, "documents", "cover_image_url")) {
+    connection.exec("ALTER TABLE documents ADD COLUMN cover_image_url TEXT;");
   }
 }
 
 function ensureAppSettingsAiApiKeyColumn(connection: Database.Database): void {
-  if (!tableHasColumn(connection, 'app_settings', 'ai_api_key')) {
-    connection.exec('ALTER TABLE app_settings ADD COLUMN ai_api_key TEXT;')
+  if (!tableHasColumn(connection, "app_settings", "ai_api_key")) {
+    connection.exec("ALTER TABLE app_settings ADD COLUMN ai_api_key TEXT;");
   }
 }
 
 function ensureLocalAiColumns(connection: Database.Database): void {
-  if (!tableHasColumn(connection, 'app_settings', 'local_ai_enabled')) {
-    connection.exec('ALTER TABLE app_settings ADD COLUMN local_ai_enabled INTEGER NOT NULL DEFAULT 1;')
+  if (!tableHasColumn(connection, "app_settings", "local_ai_enabled")) {
+    connection.exec(
+      "ALTER TABLE app_settings ADD COLUMN local_ai_enabled INTEGER NOT NULL DEFAULT 1;",
+    );
   }
-  if (!tableHasColumn(connection, 'app_settings', 'ollama_setup_complete')) {
-    connection.exec('ALTER TABLE app_settings ADD COLUMN ollama_setup_complete INTEGER NOT NULL DEFAULT 0;')
+  if (!tableHasColumn(connection, "app_settings", "ollama_setup_complete")) {
+    connection.exec(
+      "ALTER TABLE app_settings ADD COLUMN ollama_setup_complete INTEGER NOT NULL DEFAULT 0;",
+    );
+  }
+}
+
+function ensureRefinementColumns(connection: Database.Database): void {
+  if (!tableHasColumn(connection, "app_settings", "refinement_provider")) {
+    connection.exec(
+      "ALTER TABLE app_settings ADD COLUMN refinement_provider TEXT NOT NULL DEFAULT 'google';",
+    );
+  }
+  if (!tableHasColumn(connection, "app_settings", "refinement_model")) {
+    connection.exec(
+      "ALTER TABLE app_settings ADD COLUMN refinement_model TEXT NOT NULL DEFAULT 'gemini-3.1-flash-lite-preview';",
+    );
+  }
+  if (!tableHasColumn(connection, "app_settings", "refinement_api_key")) {
+    connection.exec(
+      "ALTER TABLE app_settings ADD COLUMN refinement_api_key TEXT;",
+    );
   }
 }
 
 function ensureChapterRefinementColumns(connection: Database.Database): void {
-  if (!tableHasColumn(connection, 'chapters', 'refined_content_json')) {
-    connection.exec('ALTER TABLE chapters ADD COLUMN refined_content_json TEXT;')
+  if (!tableHasColumn(connection, "chapters", "refined_content_json")) {
+    connection.exec(
+      "ALTER TABLE chapters ADD COLUMN refined_content_json TEXT;",
+    );
   }
-  if (!tableHasColumn(connection, 'chapters', 'refinement_status')) {
-    connection.exec("ALTER TABLE chapters ADD COLUMN refinement_status TEXT NOT NULL DEFAULT 'pending';")
+  if (!tableHasColumn(connection, "chapters", "refinement_status")) {
+    connection.exec(
+      "ALTER TABLE chapters ADD COLUMN refinement_status TEXT NOT NULL DEFAULT 'pending';",
+    );
+  }
+  if (!tableHasColumn(connection, "chapters", "outline_depth")) {
+    connection.exec(
+      "ALTER TABLE chapters ADD COLUMN outline_depth INTEGER NOT NULL DEFAULT 0;",
+    );
   }
 }
 
-function backfillDocumentCoverImageReferences(connection: Database.Database): void {
+function backfillDocumentCoverImageReferences(
+  connection: Database.Database,
+): void {
   const rows = connection
-    .prepare('SELECT id, metadata_json, cover_image_url FROM documents WHERE cover_image_url IS NULL OR cover_image_url = ?')
-    .all('') as Array<{ id: string; metadata_json: string; cover_image_url: string | null }>
+    .prepare(
+      "SELECT id, metadata_json, cover_image_url FROM documents WHERE cover_image_url IS NULL OR cover_image_url = ?",
+    )
+    .all("") as Array<{
+    id: string;
+    metadata_json: string;
+    cover_image_url: string | null;
+  }>;
 
-  const updateStatement = connection.prepare('UPDATE documents SET cover_image_url = ? WHERE id = ?')
+  const updateStatement = connection.prepare(
+    "UPDATE documents SET cover_image_url = ? WHERE id = ?",
+  );
 
   for (const row of rows) {
-    const coverImageUrl = readCoverImageUrlFromMetadataJson(row.metadata_json)
+    const coverImageUrl = readCoverImageUrlFromMetadataJson(row.metadata_json);
 
     if (!coverImageUrl) {
-      continue
+      continue;
     }
 
-    updateStatement.run(coverImageUrl, row.id)
+    updateStatement.run(coverImageUrl, row.id);
   }
 }
 
@@ -194,53 +246,72 @@ function createTables(connection: Database.Database): void {
       ai_model TEXT,
       ai_api_key TEXT
     );
-  `)
+  `);
 
-  ensureDocumentCoverImageColumn(connection)
-  backfillDocumentCoverImageReferences(connection)
-  ensureAppSettingsAiApiKeyColumn(connection)
-  ensureLocalAiColumns(connection)
-  ensureChapterRefinementColumns(connection)
+  ensureDocumentCoverImageColumn(connection);
+  backfillDocumentCoverImageReferences(connection);
+  ensureAppSettingsAiApiKeyColumn(connection);
+  ensureLocalAiColumns(connection);
+  ensureChapterRefinementColumns(connection);
+  ensureRefinementColumns(connection);
 }
 
 export function createDatabaseContext(userDataPath: string): DatabaseContext {
-  const dataRoot = path.join(userDataPath, 'paper-magic')
-  const libraryRoot = path.join(dataRoot, 'library')
-  ensureDirectory(libraryRoot)
+  const dataRoot = path.join(userDataPath, "paper-magic");
+  const libraryRoot = path.join(dataRoot, "library");
+  ensureDirectory(libraryRoot);
 
-  const databasePath = path.join(dataRoot, 'papermagic.db')
-  const connection = new Database(databasePath)
-  createTables(connection)
+  const databasePath = path.join(dataRoot, "papermagic.db");
+  const connection = new Database(databasePath);
+  createTables(connection);
 
   return {
     connection,
     db: drizzle(connection, { schema }),
     dataRoot,
     libraryRoot,
-  }
+  };
 }
 
 function hydrateDocuments(context: DatabaseContext): DocumentRecord[] {
-  const documentRows = context.db.select().from(documentsTable).all()
-  const chapterRows = context.db.select().from(chaptersTable).orderBy(asc(chaptersTable.orderIndex)).all()
-  const chapterMap = new Map<string, Chapter[]>()
+  const documentRows = context.db.select().from(documentsTable).all();
+  const chapterRows = context.connection
+    .prepare(
+      `SELECT id, document_id as documentId, title, order_index as orderIndex,
+              content_json as contentJson, refined_content_json as refinedContentJson,
+              outline_depth as outlineDepth
+       FROM chapters ORDER BY order_index ASC`,
+    )
+    .all() as Array<{
+      id: string;
+      documentId: string;
+      title: string;
+      orderIndex: number;
+      contentJson: string;
+      refinedContentJson: string | null;
+      outlineDepth: number;
+    }>;
+  const chapterMap = new Map<string, Chapter[]>();
 
   chapterRows.forEach((row) => {
-    const chapters = chapterMap.get(row.documentId) ?? []
-    chapters.push({
+    const chapters = chapterMap.get(row.documentId) ?? [];
+    const chapter: Chapter = {
       id: row.id,
       title: row.title,
-      content: parseJson(row.contentJson),
-    })
-    chapterMap.set(row.documentId, chapters)
-  })
+      // Use refined content if available so reader shows polished text on reload
+      content: parseJson(row.refinedContentJson ?? row.contentJson),
+    };
+    if (row.outlineDepth) chapter.outlineDepth = row.outlineDepth;
+    chapters.push(chapter);
+    chapterMap.set(row.documentId, chapters);
+  });
 
   return documentRows
     .map((row) => {
-      const metadata = parseJson<DocumentMetadata>(row.metadataJson)
+      const metadata = parseJson<DocumentMetadata>(row.metadataJson);
 
       if (row.coverImageUrl && metadata.coverImageUrl !== row.coverImageUrl) {
-        metadata.coverImageUrl = row.coverImageUrl
+        metadata.coverImageUrl = row.coverImageUrl;
       }
 
       return {
@@ -248,18 +319,19 @@ function hydrateDocuments(context: DatabaseContext): DocumentRecord[] {
         title: row.title,
         author: row.author,
         coverHue: row.coverHue,
-        sourceType: row.sourceType as DocumentRecord['sourceType'],
+        sourceType: row.sourceType as DocumentRecord["sourceType"],
         description: row.description,
         chapters: chapterMap.get(row.id) ?? [],
         toc: parseJson<TocItem[]>(row.tocJson),
         metadata,
-        preferredMode: row.preferredMode as DocumentRecord['preferredMode'],
-      }
+        preferredMode: row.preferredMode as DocumentRecord["preferredMode"],
+      };
     })
     .sort(
       (left, right) =>
-        new Date(right.metadata.importedAt).getTime() - new Date(left.metadata.importedAt).getTime(),
-    )
+        new Date(right.metadata.importedAt).getTime() -
+        new Date(left.metadata.importedAt).getTime(),
+    );
 }
 
 export function loadState(context: DatabaseContext): PersistedState {
@@ -267,19 +339,24 @@ export function loadState(context: DatabaseContext): PersistedState {
     .select()
     .from(preferencesTable)
     .where(eq(preferencesTable.id, 1))
-    .get()
+    .get();
 
   return {
     documents: hydrateDocuments(context),
-    progress: context.db.select().from(progressTable).orderBy(desc(progressTable.lastOpenedAt)).all().map((row) => ({
-      documentId: row.documentId,
-      progress: row.progress,
-      chapterId: row.chapterId,
-      blockId: row.blockId,
-      pageIndex: row.pageIndex,
-      readingMode: row.readingMode as ReadingProgress['readingMode'],
-      lastOpenedAt: row.lastOpenedAt,
-    })),
+    progress: context.db
+      .select()
+      .from(progressTable)
+      .orderBy(desc(progressTable.lastOpenedAt))
+      .all()
+      .map((row) => ({
+        documentId: row.documentId,
+        progress: row.progress,
+        chapterId: row.chapterId,
+        blockId: row.blockId,
+        pageIndex: row.pageIndex,
+        readingMode: row.readingMode as ReadingProgress["readingMode"],
+        lastOpenedAt: row.lastOpenedAt,
+      })),
     highlights: context.db
       .select()
       .from(highlightsTable)
@@ -312,21 +389,35 @@ export function loadState(context: DatabaseContext): PersistedState {
           readingWidth: preferenceRow.readingWidth,
         }
       : defaultPreferences,
-  }
+  };
 }
 
-function refreshSearchIndex(context: DatabaseContext, document: DocumentRecord): void {
+function refreshSearchIndex(
+  context: DatabaseContext,
+  document: DocumentRecord,
+): void {
   const content = flattenDocument(document)
-    .map(({ chapterTitle, block }) => [chapterTitle, block.text, block.caption, block.items?.join(' ')].filter(Boolean).join(' '))
-    .join('\n')
+    .map(({ chapterTitle, block }) =>
+      [chapterTitle, block.text, block.caption, block.items?.join(" ")]
+        .filter(Boolean)
+        .join(" "),
+    )
+    .join("\n");
 
-  context.connection.prepare('DELETE FROM documents_search WHERE document_id = ?').run(document.id)
   context.connection
-    .prepare('INSERT INTO documents_search (document_id, title, author, content) VALUES (?, ?, ?, ?)')
-    .run(document.id, document.title, document.author, content)
+    .prepare("DELETE FROM documents_search WHERE document_id = ?")
+    .run(document.id);
+  context.connection
+    .prepare(
+      "INSERT INTO documents_search (document_id, title, author, content) VALUES (?, ?, ?, ?)",
+    )
+    .run(document.id, document.title, document.author, content);
 }
 
-export function upsertDocument(context: DatabaseContext, document: DocumentRecord): void {
+export function upsertDocument(
+  context: DatabaseContext,
+  document: DocumentRecord,
+): void {
   context.db.transaction((tx) => {
     tx.insert(documentsTable)
       .values({
@@ -355,9 +446,11 @@ export function upsertDocument(context: DatabaseContext, document: DocumentRecor
           preferredMode: document.preferredMode,
         },
       })
-      .run()
+      .run();
 
-    tx.delete(chaptersTable).where(eq(chaptersTable.documentId, document.id)).run()
+    tx.delete(chaptersTable)
+      .where(eq(chaptersTable.documentId, document.id))
+      .run();
 
     if (document.chapters.length > 0) {
       tx.insert(chaptersTable)
@@ -368,16 +461,20 @@ export function upsertDocument(context: DatabaseContext, document: DocumentRecor
             title: chapter.title,
             orderIndex: index,
             contentJson: JSON.stringify(chapter.content),
+            outlineDepth: chapter.outlineDepth ?? 0,
           })),
         )
-        .run()
+        .run();
     }
-  })
+  });
 
-  refreshSearchIndex(context, document)
+  refreshSearchIndex(context, document);
 }
 
-export function saveProgress(context: DatabaseContext, progress: ReadingProgress): void {
+export function saveProgress(
+  context: DatabaseContext,
+  progress: ReadingProgress,
+): void {
   context.db
     .insert(progressTable)
     .values({
@@ -400,14 +497,20 @@ export function saveProgress(context: DatabaseContext, progress: ReadingProgress
         lastOpenedAt: progress.lastOpenedAt,
       },
     })
-    .run()
+    .run();
 }
 
-export function savePreferences(context: DatabaseContext, preferences: ReaderPreferences): ReaderPreferences {
+export function savePreferences(
+  context: DatabaseContext,
+  preferences: ReaderPreferences,
+): ReaderPreferences {
   const nextPreferences = {
     fontSize: Math.min(24, Math.max(16, Math.round(preferences.fontSize))),
-    readingWidth: Math.min(1040, Math.max(700, Math.round(preferences.readingWidth))),
-  }
+    readingWidth: Math.min(
+      1040,
+      Math.max(700, Math.round(preferences.readingWidth)),
+    ),
+  };
 
   context.db
     .insert(preferencesTable)
@@ -423,12 +526,15 @@ export function savePreferences(context: DatabaseContext, preferences: ReaderPre
         readingWidth: nextPreferences.readingWidth,
       },
     })
-    .run()
+    .run();
 
-  return nextPreferences
+  return nextPreferences;
 }
 
-export function addHighlight(context: DatabaseContext, highlight: Highlight): Highlight {
+export function addHighlight(
+  context: DatabaseContext,
+  highlight: Highlight,
+): Highlight {
   context.db
     .insert(highlightsTable)
     .values({
@@ -439,16 +545,25 @@ export function addHighlight(context: DatabaseContext, highlight: Highlight): Hi
       text: highlight.text,
       createdAt: highlight.createdAt,
     })
-    .run()
+    .run();
 
-  return highlight
+  return highlight;
 }
 
-export function removeHighlight(context: DatabaseContext, highlightId: string): void {
-  context.db.delete(highlightsTable).where(eq(highlightsTable.id, highlightId)).run()
+export function removeHighlight(
+  context: DatabaseContext,
+  highlightId: string,
+): void {
+  context.db
+    .delete(highlightsTable)
+    .where(eq(highlightsTable.id, highlightId))
+    .run();
 }
 
-export function addBookmark(context: DatabaseContext, bookmark: Bookmark): Bookmark {
+export function addBookmark(
+  context: DatabaseContext,
+  bookmark: Bookmark,
+): Bookmark {
   context.db
     .insert(bookmarksTable)
     .values({
@@ -459,21 +574,29 @@ export function addBookmark(context: DatabaseContext, bookmark: Bookmark): Bookm
       label: bookmark.label,
       createdAt: bookmark.createdAt,
     })
-    .run()
+    .run();
 
-  return bookmark
+  return bookmark;
 }
 
-export function removeBookmark(context: DatabaseContext, bookmarkId: string): void {
-  context.db.delete(bookmarksTable).where(eq(bookmarksTable.id, bookmarkId)).run()
+export function removeBookmark(
+  context: DatabaseContext,
+  bookmarkId: string,
+): void {
+  context.db
+    .delete(bookmarksTable)
+    .where(eq(bookmarksTable.id, bookmarkId))
+    .run();
 }
 
 export function buildHighlight(input: HighlightInput): Highlight {
   return {
     ...input,
-    id: input.blockId ? `highlight-${crypto.randomUUID()}` : crypto.randomUUID(),
+    id: input.blockId
+      ? `highlight-${crypto.randomUUID()}`
+      : crypto.randomUUID(),
     createdAt: new Date().toISOString(),
-  }
+  };
 }
 
 export function buildBookmark(input: BookmarkInput): Bookmark {
@@ -481,32 +604,58 @@ export function buildBookmark(input: BookmarkInput): Bookmark {
     ...input,
     id: input.blockId ? `bookmark-${crypto.randomUUID()}` : crypto.randomUUID(),
     createdAt: new Date().toISOString(),
-  }
+  };
 }
 
-export function documentExistsForPath(context: DatabaseContext, sourcePath: string): boolean {
-  const rows = context.db.select().from(documentsTable).all()
+export function documentExistsForPath(
+  context: DatabaseContext,
+  sourcePath: string,
+): boolean {
+  const rows = context.db.select().from(documentsTable).all();
   return rows.some((row) => {
-    const metadata = parseJson<DocumentRecord['metadata']>(row.metadataJson)
-    return metadata.sourcePath === sourcePath
-  })
+    const metadata = parseJson<DocumentRecord["metadata"]>(row.metadataJson);
+    return metadata.sourcePath === sourcePath;
+  });
 }
 
-export function documentExistsForOrigin(context: DatabaseContext, originLabel: string): boolean {
-  const rows = context.db.select().from(documentsTable).all()
+export function documentExistsForOrigin(
+  context: DatabaseContext,
+  originLabel: string,
+): boolean {
+  const rows = context.db.select().from(documentsTable).all();
   return rows.some((row) => {
-    const metadata = parseJson<DocumentRecord['metadata']>(row.metadataJson)
-    return metadata.originLabel === originLabel
-  })
+    const metadata = parseJson<DocumentRecord["metadata"]>(row.metadataJson);
+    return metadata.originLabel === originLabel;
+  });
 }
 
-export function removeDocument(context: DatabaseContext, documentId: string): void {
-  context.db.delete(bookmarksTable).where(eq(bookmarksTable.documentId, documentId)).run()
-  context.db.delete(highlightsTable).where(eq(highlightsTable.documentId, documentId)).run()
-  context.db.delete(progressTable).where(eq(progressTable.documentId, documentId)).run()
-  context.db.delete(chaptersTable).where(eq(chaptersTable.documentId, documentId)).run()
-  context.db.delete(documentsTable).where(eq(documentsTable.id, documentId)).run()
-  context.connection.prepare('DELETE FROM documents_search WHERE document_id = ?').run(documentId)
+export function removeDocument(
+  context: DatabaseContext,
+  documentId: string,
+): void {
+  context.db
+    .delete(bookmarksTable)
+    .where(eq(bookmarksTable.documentId, documentId))
+    .run();
+  context.db
+    .delete(highlightsTable)
+    .where(eq(highlightsTable.documentId, documentId))
+    .run();
+  context.db
+    .delete(progressTable)
+    .where(eq(progressTable.documentId, documentId))
+    .run();
+  context.db
+    .delete(chaptersTable)
+    .where(eq(chaptersTable.documentId, documentId))
+    .run();
+  context.db
+    .delete(documentsTable)
+    .where(eq(documentsTable.id, documentId))
+    .run();
+  context.connection
+    .prepare("DELETE FROM documents_search WHERE document_id = ?")
+    .run(documentId);
 }
 
 export function findExistingDocumentBySource(
@@ -514,16 +663,19 @@ export function findExistingDocumentBySource(
   sourcePath: string | undefined,
   originLabel: string,
 ): string | null {
-  const rows = context.db.select().from(documentsTable).all()
+  const rows = context.db.select().from(documentsTable).all();
 
   for (const row of rows) {
-    const metadata = parseJson<DocumentRecord['metadata']>(row.metadataJson)
-    if ((sourcePath && metadata.sourcePath === sourcePath) || metadata.originLabel === originLabel) {
-      return row.id
+    const metadata = parseJson<DocumentRecord["metadata"]>(row.metadataJson);
+    if (
+      (sourcePath && metadata.sourcePath === sourcePath) ||
+      metadata.originLabel === originLabel
+    ) {
+      return row.id;
     }
   }
 
-  return null
+  return null;
 }
 
 const defaultSettings: AppSettings = {
@@ -532,25 +684,39 @@ const defaultSettings: AppSettings = {
   aiModel: null,
   aiApiKey: null,
   localAiEnabled: true,
-}
+  refinementProvider: "google",
+  refinementModel: "gemini-3.1-flash-lite-preview",
+  refinementApiKey: null,
+};
 
 export function loadSettings(context: DatabaseContext): AppSettings {
-  const row = context.db.select().from(settingsTable).where(eq(settingsTable.id, 1)).get()
+  const row = context.db
+    .select()
+    .from(settingsTable)
+    .where(eq(settingsTable.id, 1))
+    .get();
 
   if (!row) {
-    return defaultSettings
+    return defaultSettings;
   }
 
   return {
     aiEnabled: row.aiEnabled,
-    aiProvider: (row.aiProvider as AppSettings['aiProvider']) ?? null,
+    aiProvider: (row.aiProvider as AppSettings["aiProvider"]) ?? null,
     aiModel: row.aiModel ?? null,
     aiApiKey: row.aiApiKey ?? null,
     localAiEnabled: row.localAiEnabled ?? true,
-  }
+    refinementProvider:
+      (row.refinementProvider as AppSettings["refinementProvider"]) ?? "google",
+    refinementModel: row.refinementModel ?? "gemini-3.1-flash-lite-preview",
+    refinementApiKey: row.refinementApiKey ?? null,
+  };
 }
 
-export function saveSettings(context: DatabaseContext, settings: AppSettings): AppSettings {
+export function saveSettings(
+  context: DatabaseContext,
+  settings: AppSettings,
+): AppSettings {
   context.db
     .insert(settingsTable)
     .values({
@@ -560,6 +726,9 @@ export function saveSettings(context: DatabaseContext, settings: AppSettings): A
       aiModel: settings.aiModel ?? null,
       aiApiKey: settings.aiApiKey ?? null,
       localAiEnabled: settings.localAiEnabled,
+      refinementProvider: settings.refinementProvider,
+      refinementModel: settings.refinementModel,
+      refinementApiKey: settings.refinementApiKey ?? null,
     })
     .onConflictDoUpdate({
       target: settingsTable.id,
@@ -569,52 +738,85 @@ export function saveSettings(context: DatabaseContext, settings: AppSettings): A
         aiModel: settings.aiModel ?? null,
         aiApiKey: settings.aiApiKey ?? null,
         localAiEnabled: settings.localAiEnabled,
+        refinementProvider: settings.refinementProvider,
+        refinementModel: settings.refinementModel,
+        refinementApiKey: settings.refinementApiKey ?? null,
       },
     })
-    .run()
+    .run();
 
-  return settings
+  return settings;
 }
 
 export function isOllamaSetupComplete(context: DatabaseContext): boolean {
-  const row = context.db.select().from(settingsTable).where(eq(settingsTable.id, 1)).get()
-  return row?.ollamaSetupComplete ?? false
+  const row = context.db
+    .select()
+    .from(settingsTable)
+    .where(eq(settingsTable.id, 1))
+    .get();
+  return row?.ollamaSetupComplete ?? false;
 }
 
 export function markOllamaSetupComplete(context: DatabaseContext): void {
   context.db
     .insert(settingsTable)
-    .values({ id: 1, aiEnabled: false, localAiEnabled: true, ollamaSetupComplete: true })
-    .onConflictDoUpdate({ target: settingsTable.id, set: { ollamaSetupComplete: true } })
-    .run()
+    .values({
+      id: 1,
+      aiEnabled: false,
+      localAiEnabled: true,
+      ollamaSetupComplete: true,
+    })
+    .onConflictDoUpdate({
+      target: settingsTable.id,
+      set: { ollamaSetupComplete: true },
+    })
+    .run();
 }
 
 export interface ChapterRefinementRow {
-  id: string
-  documentId: string
-  orderIndex: number
-  contentJson: string
-  refinementStatus: string
+  id: string;
+  documentId: string;
+  orderIndex: number;
+  contentJson: string;
+  refinementStatus: string;
+  outlineDepth: number;
+  title: string;
 }
 
-export function getPendingRefinementChapters(context: DatabaseContext): ChapterRefinementRow[] {
+export function getPendingRefinementChapters(
+  context: DatabaseContext,
+): ChapterRefinementRow[] {
   return context.connection
     .prepare(
-      `SELECT id, document_id as documentId, order_index as orderIndex, content_json as contentJson, refinement_status as refinementStatus
-       FROM chapters WHERE refinement_status = 'pending' ORDER BY order_index ASC`
+      `SELECT id, document_id as documentId, order_index as orderIndex, content_json as contentJson, refinement_status as refinementStatus, outline_depth as outlineDepth, title
+       FROM chapters WHERE refinement_status = 'pending' ORDER BY order_index ASC`,
     )
-    .all() as ChapterRefinementRow[]
+    .all() as ChapterRefinementRow[];
+}
+
+export function getAllChapterRowsForDocument(
+  context: DatabaseContext,
+  documentId: string,
+): Array<{ id: string; title: string; contentJson: string; refinedContentJson: string | null; outlineDepth: number; orderIndex: number }> {
+  return context.connection
+    .prepare(
+      `SELECT id, title, content_json as contentJson, refined_content_json as refinedContentJson, outline_depth as outlineDepth, order_index as orderIndex
+       FROM chapters WHERE document_id = ? ORDER BY order_index ASC`,
+    )
+    .all(documentId) as Array<{ id: string; title: string; contentJson: string; refinedContentJson: string | null; outlineDepth: number; orderIndex: number }>;
 }
 
 export function saveRefinedChapter(
   context: DatabaseContext,
   chapterId: string,
   refinedContentJson: string,
-  status: 'done' | 'failed',
+  status: "done" | "failed",
 ): void {
   context.connection
-    .prepare('UPDATE chapters SET refined_content_json = ?, refinement_status = ? WHERE id = ?')
-    .run(refinedContentJson, status, chapterId)
+    .prepare(
+      "UPDATE chapters SET refined_content_json = ?, refinement_status = ? WHERE id = ?",
+    )
+    .run(refinedContentJson, status, chapterId);
 }
 
 export function markChapterRefinementStatus(
@@ -623,12 +825,44 @@ export function markChapterRefinementStatus(
   status: string,
 ): void {
   context.connection
-    .prepare('UPDATE chapters SET refinement_status = ? WHERE id = ?')
-    .run(status, chapterId)
+    .prepare("UPDATE chapters SET refinement_status = ? WHERE id = ?")
+    .run(status, chapterId);
 }
 
-export function resetDocumentRefinement(context: DatabaseContext, documentId: string): void {
+export function resetDocumentRefinement(
+  context: DatabaseContext,
+  documentId: string,
+): void {
   context.connection
-    .prepare("UPDATE chapters SET refinement_status = 'pending', refined_content_json = NULL WHERE document_id = ?")
-    .run(documentId)
+    .prepare(
+      "UPDATE chapters SET refinement_status = 'pending', refined_content_json = NULL WHERE document_id = ?",
+    )
+    .run(documentId);
+}
+
+export function resetStuckProcessingChapters(context: DatabaseContext): void {
+  context.connection
+    .prepare(
+      "UPDATE chapters SET refinement_status = 'pending' WHERE refinement_status = 'processing'",
+    )
+    .run();
+}
+
+export function updateDocumentToc(
+  context: DatabaseContext,
+  documentId: string,
+  toc: TocItem[],
+): void {
+  context.connection
+    .prepare("UPDATE documents SET toc_json = ? WHERE id = ?")
+    .run(JSON.stringify(toc), documentId);
+}
+
+export function getRefiningDocumentIds(context: DatabaseContext): string[] {
+  const rows = context.connection
+    .prepare(
+      `SELECT DISTINCT document_id FROM chapters WHERE refinement_status IN ('pending', 'processing')`,
+    )
+    .all() as Array<{ document_id: string }>;
+  return rows.map((r) => r.document_id);
 }

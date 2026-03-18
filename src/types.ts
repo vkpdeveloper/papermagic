@@ -1,7 +1,7 @@
 export type AppMode = 'library' | 'reader'
 export type DocumentSource = 'pdf' | 'epub'
 export type ReadingMode = 'scroll' | 'page'
-export type ReaderBlockType = 'heading' | 'paragraph' | 'quote' | 'list' | 'code' | 'image'
+export type ReaderBlockType = 'heading' | 'paragraph' | 'quote' | 'list' | 'code' | 'image' | 'math' | 'table'
 
 export interface ReaderBlock {
   id: string
@@ -12,12 +12,14 @@ export interface ReaderBlock {
   alt?: string
   caption?: string
   src?: string
+  language?: string
 }
 
 export interface Chapter {
   id: string
   title: string
   content: ReaderBlock[]
+  outlineDepth?: number
 }
 
 export interface TocItem {
@@ -139,6 +141,9 @@ export interface AppSettings {
   aiModel: string | null
   aiApiKey: string | null
   localAiEnabled: boolean
+  refinementProvider: 'local' | AiProvider
+  refinementModel: string
+  refinementApiKey: string | null
 }
 
 export interface PaperMagicApi {
@@ -161,4 +166,5 @@ export interface PaperMagicApi {
   onOllamaProgress: (callback: (progress: OllamaSetupProgress) => void) => () => void
   onChapterRefined: (callback: (update: ChapterRefinementUpdate) => void) => () => void
   rerunRefinement: (documentId: string) => Promise<void>
+  getRefiningDocumentIds: () => Promise<string[]>
 }

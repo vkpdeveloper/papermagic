@@ -295,6 +295,7 @@ interface PdfLine {
   fontSize: number
   bold: boolean
   italic: boolean
+  mono: boolean
   pageNumber: number
   pageHeight: number
 }
@@ -392,12 +393,17 @@ function muPageToLines(page: InstanceType<typeof mupdf.Page>, pageNumber: number
       const fontSize = line.font?.size ?? 10
       const bold = line.font?.weight === 'bold'
       const italic = line.font?.style === 'italic'
+      const fontName = (line.font?.name ?? '').toLowerCase()
+      const fontFamily = (line.font?.family ?? '').toLowerCase()
+      const mono =
+        /courier|mono|consolas|inconsolata|jetbrains|firacode|sourcecodepro|source.code|menlo|monaco|dejavu.sans.mono|liberation.mono|roboto.mono|cascadia|hack|ibm.plex.mono/.test(fontName) ||
+        /courier|mono|consolas|inconsolata|jetbrains|firacode|sourcecodepro|source.code|menlo|monaco|dejavu.sans.mono|liberation.mono|roboto.mono|cascadia|hack|ibm.plex.mono/.test(fontFamily)
 
       // bbox is an object {x, y, w, h} — use line's own x/y for position
       const x = line.bbox.x
       const y = line.bbox.y
 
-      rawLines.push({ text, x, y, fontSize, bold, italic, pageNumber, pageHeight })
+      rawLines.push({ text, x, y, fontSize, bold, italic, mono, pageNumber, pageHeight })
     }
   }
 
@@ -629,6 +635,7 @@ function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlo
   const blocks: ReaderBlock[] = []
   let paragraphBuffer: string[] = []
   let listBuffer: string[] = []
+  let codeBuffer: string[] = []
   let previousLine: PdfLine | null = null
   // Accumulate consecutive heading-candidate lines to join wrapped headings
   let headingBuffer: { text: string; fontSize: number; bold: boolean } | null = null
@@ -643,6 +650,12 @@ function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlo
     if (listBuffer.length === 0) return
     blocks.push({ id: createId('block'), type: 'list', items: [...listBuffer] })
     listBuffer = []
+  }
+
+  const flushCode = () => {
+    if (codeBuffer.length === 0) return
+    blocks.push({ id: createId('block'), type: 'code', text: codeBuffer.join('\n') })
+    codeBuffer = []
   }
 
   const flushHeading = () => {
@@ -674,6 +687,7 @@ function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlo
     // Drop-cap: single uppercase letter immediately before a continuation line
     // (continuation starts with a lowercase letter, indicating the cap was the first letter of a word)
     const isDropCap =
+      !cur.mono &&
       /^[A-Z]$/.test(cur.text) &&
       next !== undefined &&
       /^[a-z]/.test(next.text) &&
@@ -695,7 +709,7 @@ function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlo
     }
 
     // ── Skip residual single-letter drop-caps that had no mergeable successor ──
-    if (/^[A-Z]$/.test(line.text)) {
+    if (!line.mono && /^[A-Z]$/.test(line.text)) {
       continue
     }
 
@@ -803,6 +817,18 @@ function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlo
 
     flushHeading()
 
+    // ── Monospace lines → code block ──────────────────────────────────────────
+    if (line.mono) {
+      flushParagraph()
+      flushList()
+      codeBuffer.push(line.text)
+      previousLine = line
+      continue
+    }
+
+    // Non-mono line: flush any accumulated code block first
+    flushCode()
+
     if (startsNewParagraph) {
       flushParagraph()
       flushList()
@@ -822,6 +848,7 @@ function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlo
   flushHeading()
   flushParagraph()
   flushList()
+  flushCode()
 
   return blocks
 }
@@ -836,30 +863,49 @@ interface OutlineItem {
   page?: number
 }
 
-function extractOutlineMap(outline: OutlineItem[] | null): Map<number, string> {
-  const pageMap = new Map<number, string>()
+interface OutlineEntry {
+  title: string
+  page: number
+  depth: number
+}
 
-  const walk = (items: OutlineItem[]) => {
+function extractOutlineEntries(outline: OutlineItem[] | null): OutlineEntry[] {
+  const entries: OutlineEntry[] = []
+  const seenPages = new Set<number>()
+
+  const walk = (items: OutlineItem[], depth: number) => {
     for (const item of items) {
       const title = normalizeWhitespace(item.title ?? '')
-      // MuPDF gives us 0-based page index directly
-      if (typeof item.page === 'number' && item.page >= 0 && title && !pageMap.has(item.page + 1)) {
-        pageMap.set(item.page + 1, title)
+      if (typeof item.page === 'number' && item.page >= 0 && title) {
+        const pageNumber = item.page + 1
+        if (!seenPages.has(pageNumber)) {
+          seenPages.add(pageNumber)
+          entries.push({ title, page: pageNumber, depth })
+        }
       }
-      if (item.down && item.down.length > 0) walk(item.down)
+      if (item.down && item.down.length > 0) walk(item.down, depth + 1)
     }
   }
 
-  if (outline && outline.length > 0) walk(outline)
-  return pageMap
+  if (outline && outline.length > 0) walk(outline, 0)
+  return entries
 }
 
 function buildPdfChaptersFromOutline(
   pageBlocks: Array<{ pageNumber: number; blocks: ReaderBlock[] }>,
   outlineMap: Map<number, string>,
   fallbackTitle: string,
+  outlineEntries?: OutlineEntry[],
 ): Chapter[] {
   if (outlineMap.size === 0) return []
+
+  // Build page → depth map from outline entries
+  const depthByPage = new Map<number, number>()
+  if (outlineEntries) {
+    for (const entry of outlineEntries) {
+      depthByPage.set(entry.page, entry.depth)
+    }
+  }
 
   const chapters: Chapter[] = []
   let currentChapter: Chapter | null = null
@@ -878,6 +924,7 @@ function buildPdfChaptersFromOutline(
         id: createId('chapter'),
         title: outlineTitle || (chapters.length === 0 ? fallbackTitle : `Section ${chapters.length + 1}`),
         content: pageContent.length > 0 ? [...pageContent] : ensureReadableBlocks([], outlineTitle || fallbackTitle),
+        outlineDepth: outlineTitle ? (depthByPage.get(page.pageNumber) ?? 0) : 0,
       }
       continue
     }
@@ -977,8 +1024,9 @@ async function importPdf(filePath: string, cacheDirectory: string): Promise<Docu
 
   // ── Outline (TOC) ────────────────────────────────────────────────────────────
   const rawOutline = doc.loadOutline() as OutlineItem[] | null
-  const outlineMap = extractOutlineMap(rawOutline)
-  const outlinedChapters = buildPdfChaptersFromOutline(pageBlocks, outlineMap, fallbackTitle)
+  const outlineEntries = extractOutlineEntries(rawOutline)
+  const outlineMap = new Map(outlineEntries.map((e) => [e.page, e.title]))
+  const outlinedChapters = buildPdfChaptersFromOutline(pageBlocks, outlineMap, fallbackTitle, outlineEntries)
 
   // ── Assemble chapters: outline → heading split → per-page fallback ──────────
   const chapters: Chapter[] =
@@ -1014,57 +1062,106 @@ async function importPdf(filePath: string, cacheDirectory: string): Promise<Docu
   })
 }
 
-async function extractEpubToc(zip: JSZip, basePath: string, manifest: Map<string, string>): Promise<Map<string, string>> {
-  const toc = new Map<string, string>()
-  const navEntry = Array.from(manifest.entries()).find(
-    ([id, itemPath]) =>
-      id.toLowerCase() === 'nav' || /(^|\/)nav\.(xhtml|html)$/i.test(itemPath) || /(^|\/)toc\.(xhtml|html)$/i.test(itemPath),
-  )
+interface EpubTocEntry {
+  title: string
+  depth: number
+}
 
-  if (navEntry) {
-    const [, navPath] = navEntry
-    const navFile = zip.file(navPath)
-    if (navFile) {
-      const navMarkup = await navFile.async('text')
-      const { document } = parseHTML(navMarkup)
-      document.querySelectorAll('nav a').forEach((anchor) => {
-        const href = anchor.getAttribute('href')
-        const title = normalizeWhitespace(anchor.textContent ?? '')
-        if (href && title) {
-          toc.set(resolvePosixPath(navPath, href), title)
-        }
-      })
-    }
-  }
+async function extractEpubToc(
+  zip: JSZip,
+  opfPath: string,
+  manifest: Map<string, string>,
+  packageRecord: Record<string, unknown>,
+): Promise<Map<string, EpubTocEntry>> {
+  const toc = new Map<string, EpubTocEntry>()
 
-  const ncxEntry = Array.from(manifest.entries()).find(([, itemPath]) => itemPath.endsWith('.ncx'))
+  // ── EPUB 3: find item with properties="nav" ──────────────────────────────
+  const manifestItems = toArray((packageRecord.manifest as Record<string, unknown>)?.item) as Array<Record<string, unknown>>
+  const navItem = manifestItems.find((item) => {
+    const props = String(item['@_properties'] ?? '').split(/\s+/)
+    return props.includes('nav')
+  })
 
-  if (toc.size === 0 && ncxEntry) {
-    const [, ncxPath] = ncxEntry
-    const ncxFile = zip.file(ncxPath)
-    if (ncxFile) {
-      const ncxMarkup = await ncxFile.async('text')
-      const parsed = xmlParser.parse(ncxMarkup) as Record<string, unknown>
-      const walk = (node: unknown) => {
-        const points = toArray((node as Record<string, unknown>)?.navPoint)
-        points.forEach((point) => {
-          const pointRecord = point as Record<string, unknown>
-          const href = pointRecord.content
-            ? resolvePosixPath(ncxPath, String((pointRecord.content as Record<string, unknown>)['@_src'] ?? ''))
-            : ''
-          const label = textFromXmlValue((pointRecord.navLabel as Record<string, unknown>)?.text)
-          if (href && label) {
-            toc.set(href, label)
+  if (navItem) {
+    const navHref = String(navItem['@_href'] ?? '').trim()
+    if (navHref) {
+      const navPath = path.posix.normalize(path.posix.join(path.posix.dirname(opfPath), navHref))
+      const navFile = zip.file(navPath)
+      if (navFile) {
+        const navMarkup = await navFile.async('text')
+        const { document } = parseHTML(navMarkup)
+
+        // Find the toc nav — prefer epub:type="toc", fall back to first <nav>
+        const tocNav =
+          document.querySelector('nav[epub\\:type="toc"]') ??
+          document.querySelector('nav[epub:type="toc"]') ??
+          document.querySelector('nav')
+
+        if (tocNav) {
+          const walkNavOl = (ol: Element, depth: number) => {
+            for (const li of Array.from(ol.children)) {
+              if (li.tagName.toLowerCase() !== 'li') continue
+              const anchor = li.querySelector('a')
+              const href = anchor?.getAttribute('href')
+              const title = normalizeWhitespace(anchor?.textContent ?? '')
+              if (href && title) {
+                // Strip fragment so path lookup works; keep for navigation
+                const hrefNoFragment = href.split('#')[0]
+                const resolved = hrefNoFragment
+                  ? resolvePosixPath(navPath, hrefNoFragment)
+                  : navPath
+                if (!toc.has(resolved)) {
+                  toc.set(resolved, { title, depth })
+                }
+              }
+              // Recurse into nested <ol>
+              const nestedOl = li.querySelector('ol')
+              if (nestedOl) walkNavOl(nestedOl, depth + 1)
+            }
           }
-          walk(pointRecord)
-        })
+
+          const rootOl = tocNav.querySelector('ol')
+          if (rootOl) walkNavOl(rootOl, 0)
+        }
       }
-      walk((parsed.ncx as Record<string, unknown>)?.navMap)
     }
   }
 
+  // ── EPUB 2: NCX fallback ─────────────────────────────────────────────────
   if (toc.size === 0) {
-    toc.set(basePath, '')
+    // Try to find NCX via spine toc attribute first, then by media-type/extension
+    const spineTocId = String((packageRecord.spine as Record<string, unknown>)?.['@_toc'] ?? '').trim()
+    const ncxPathFromSpine = spineTocId ? manifest.get(spineTocId) : undefined
+    const ncxPathFromExtension = Array.from(manifest.values()).find((p) => p.endsWith('.ncx'))
+    const ncxPath = ncxPathFromSpine ?? ncxPathFromExtension
+
+    if (ncxPath) {
+      const ncxFile = zip.file(ncxPath)
+      if (ncxFile) {
+        const ncxMarkup = await ncxFile.async('text')
+        const parsed = xmlParser.parse(ncxMarkup) as Record<string, unknown>
+
+        const walkNcx = (node: unknown, depth: number) => {
+          const points = toArray((node as Record<string, unknown>)?.navPoint)
+          points.forEach((point) => {
+            const pointRecord = point as Record<string, unknown>
+            const src = String((pointRecord.content as Record<string, unknown>)?.['@_src'] ?? '').trim()
+            const label = textFromXmlValue((pointRecord.navLabel as Record<string, unknown>)?.text)
+            if (src && label) {
+              const srcNoFragment = src.split('#')[0]
+              const resolved = srcNoFragment ? resolvePosixPath(ncxPath, srcNoFragment) : ncxPath
+              if (!toc.has(resolved)) {
+                toc.set(resolved, { title: label, depth })
+              }
+            }
+            // Recurse for nested navPoints
+            walkNcx(pointRecord, depth + 1)
+          })
+        }
+
+        walkNcx((parsed.ncx as Record<string, unknown>)?.navMap, 0)
+      }
+    }
   }
 
   return toc
@@ -1420,6 +1517,7 @@ interface EpubSegment {
   title: string
   blocks: ReaderBlock[]
   startsChapter: boolean
+  outlineDepth: number
 }
 
 function mergeEpubSegments(title: string, segments: EpubSegment[]): Chapter[] {
@@ -1436,6 +1534,7 @@ function mergeEpubSegments(title: string, segments: EpubSegment[]): Chapter[] {
         id: createId('chapter'),
         title: nextTitle,
         content: [],
+        outlineDepth: segment.outlineDepth,
       }
     }
 
@@ -1496,7 +1595,7 @@ async function importEpub(filePath: string, cacheDirectory: string): Promise<Doc
     cacheDirectory,
   )
 
-  const tocMap = await extractEpubToc(zip, opfPath, manifestById)
+  const tocMap = await extractEpubToc(zip, opfPath, manifestById, packageRecord)
   const spineItems = toArray((packageRecord.spine as Record<string, unknown>)?.itemref)
   const segments: EpubSegment[] = []
 
@@ -1515,7 +1614,8 @@ async function importEpub(filePath: string, cacheDirectory: string): Promise<Doc
 
     const chapterMarkup = await chapterFile.async('text')
     const htmlWithLocalImages = await rewriteEpubImages(zip, chapterPath, cacheDirectory, chapterMarkup)
-    const explicitTitle = tocMap.get(chapterPath) || ''
+    const tocEntry = tocMap.get(chapterPath)
+    const explicitTitle = tocEntry?.title ?? ''
     const fallbackTitle = explicitTitle || `Section ${index + 1}`
     const blocks = htmlToBlocks(htmlWithLocalImages)
 
@@ -1529,6 +1629,7 @@ async function importEpub(filePath: string, cacheDirectory: string): Promise<Doc
       startsChapter:
         Boolean(explicitTitle) ||
         (blocks[0]?.type === 'heading' && Math.min(blocks[0].level ?? 2, 2) <= 2),
+      outlineDepth: tocEntry?.depth ?? 0,
     })
 
     await delay()

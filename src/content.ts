@@ -22,14 +22,6 @@ export function hueFromTitle(title: string): number {
   return Array.from(title).reduce((total, char) => total + char.charCodeAt(0), 0) % 360
 }
 
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/!\[(.*?)\]\((.*?)\)/g, '$1')
-    .replace(/[#>*`_~]/g, '')
-    .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
-    .trim()
-}
-
 function normalizeLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
@@ -58,28 +50,36 @@ function countWords(chapters: Chapter[]): number {
 export function buildToc(chapters: Chapter[]): TocItem[] {
   const items: TocItem[] = []
 
+  // Find minimum depth so we can normalize (depth 0 → level 1, depth 1 → level 2, etc.)
+  const minDepth = chapters.reduce((min, ch) => Math.min(min, ch.outlineDepth ?? 0), 0)
+
   chapters.forEach((chapter) => {
     if (!isUtilityHeading(chapter.title)) {
+      const chapterLevel = Math.min((chapter.outlineDepth ?? 0) - minDepth + 1, 3)
       items.push({
         id: `${chapter.id}-toc`,
         title: chapter.title,
         chapterId: chapter.id,
         blockId: chapter.content[0]?.id ?? chapter.id,
-        level: 1,
+        level: chapterLevel,
       })
     }
 
-    chapter.content.forEach((block) => {
-      if (block.type === 'heading' && block.text && !isUtilityHeading(block.text)) {
-        items.push({
-          id: `${block.id}-toc`,
-          title: block.text,
-          chapterId: chapter.id,
-          blockId: block.id,
-          level: Math.min(block.level ?? 2, 3),
-        })
-      }
-    })
+    // Only add heading blocks for top-level chapters (depth == minDepth) to avoid
+    // duplicating sub-chapters that are already their own TocItems
+    if ((chapter.outlineDepth ?? 0) === minDepth) {
+      chapter.content.forEach((block) => {
+        if (block.type === 'heading' && block.text && !isUtilityHeading(block.text)) {
+          items.push({
+            id: `${block.id}-toc`,
+            title: block.text,
+            chapterId: chapter.id,
+            blockId: block.id,
+            level: Math.min((block.level ?? 2) + minDepth, 3),
+          })
+        }
+      })
+    }
   })
 
   return items
@@ -185,7 +185,11 @@ export function markdownToBlocks(markdown: string): ReaderBlock[] {
   let paragraphBuffer: string[] = []
   let listBuffer: string[] = []
   let codeBuffer: string[] = []
+  let mathBuffer: string[] = []
+  let tableBuffer: string[] = []
   let insideCode = false
+  let codeLang = ''
+  let insideMath = false
 
   const flushParagraph = () => {
     if (paragraphBuffer.length === 0) {
@@ -222,20 +226,69 @@ export function markdownToBlocks(markdown: string): ReaderBlock[] {
       id: createId('block'),
       type: 'code',
       text: codeBuffer.join('\n'),
+      language: codeLang || undefined,
     })
     codeBuffer = []
+    codeLang = ''
+  }
+
+  const flushMath = () => {
+    if (mathBuffer.length === 0) {
+      return
+    }
+
+    blocks.push({
+      id: createId('block'),
+      type: 'math',
+      text: mathBuffer.join('\n'),
+    })
+    mathBuffer = []
+  }
+
+  const flushTable = () => {
+    if (tableBuffer.length === 0) {
+      return
+    }
+
+    blocks.push({
+      id: createId('block'),
+      type: 'table',
+      text: tableBuffer.join('\n'),
+    })
+    tableBuffer = []
   }
 
   for (const line of lines) {
     const trimmed = line.trim()
+
+    // Block math: $$...$$
+    if (trimmed === '$$') {
+      if (insideMath) {
+        flushMath()
+        insideMath = false
+      } else {
+        flushParagraph()
+        flushList()
+        insideMath = true
+      }
+      continue
+    }
+
+    if (insideMath) {
+      mathBuffer.push(line)
+      continue
+    }
 
     if (trimmed.startsWith('```')) {
       flushParagraph()
       flushList()
       if (insideCode) {
         flushCode()
+        insideCode = false
+      } else {
+        codeLang = trimmed.slice(3).trim()
+        insideCode = true
       }
-      insideCode = !insideCode
       continue
     }
 
@@ -247,7 +300,19 @@ export function markdownToBlocks(markdown: string): ReaderBlock[] {
     if (trimmed.length === 0) {
       flushParagraph()
       flushList()
+      flushTable()
       continue
+    }
+
+    // Table rows: lines that start and/or end with | and contain at least one more |
+    const isTableRow = trimmed.startsWith('|') && trimmed.includes('|', 1)
+    if (isTableRow) {
+      flushParagraph()
+      flushList()
+      tableBuffer.push(trimmed)
+      continue
+    } else {
+      flushTable()
     }
 
     const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/)
@@ -296,12 +361,14 @@ export function markdownToBlocks(markdown: string): ReaderBlock[] {
       continue
     }
 
-    paragraphBuffer.push(stripMarkdown(trimmed))
+    paragraphBuffer.push(trimmed)
   }
 
   flushParagraph()
   flushList()
   flushCode()
+  flushMath()
+  flushTable()
 
   return blocks
 }

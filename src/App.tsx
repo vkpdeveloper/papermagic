@@ -11,7 +11,6 @@ import {
 } from 'react'
 import { useHotkey, useHotkeySequence } from '@tanstack/react-hotkeys'
 import {
-  AlignJustify as AlignJustifyIcon,
   BookOpen as BookOpenIcon,
   Bookmark as BookmarkIcon,
   ChevronLeft as ChevronLeftIcon,
@@ -22,13 +21,14 @@ import {
   NotebookPen as NotebookPenIcon,
   PanelLeftClose as PanelLeftCloseIcon,
   PanelLeftOpen as PanelLeftOpenIcon,
+  Loader2 as Loader2Icon,
   Search as SearchIcon,
   Settings as SettingsIcon,
   Upload as UploadIcon,
   X as XIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { buildSearchResults, isUtilityHeading } from './content'
+import { buildSearchResults, buildToc, isUtilityHeading } from './content'
 import { defaultPreferences } from './storage'
 import type {
   AppMode,
@@ -38,10 +38,13 @@ import type {
   Highlight,
   PersistedState,
   ReaderBlock,
-  ReadingMode,
   ReadingProgress,
   TocItem,
 } from './types'
+import { Streamdown, type ThemeInput } from 'streamdown'
+import { createMathPlugin } from '@streamdown/math'
+import { createCodePlugin } from '@streamdown/code'
+import { createCjkPlugin } from '@streamdown/cjk'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { Dialog } from './components/ui/Dialog'
 import { DropOverlay } from './components/DropOverlay'
@@ -83,13 +86,6 @@ interface TocGroup {
   title: string
   blockId: string
   items: TocItem[]
-}
-
-type PageEntry = {
-  id: string
-  kind: 'block'
-  chapterId: string
-  block: ReaderBlock
 }
 
 type DroppedFile = File & {
@@ -227,23 +223,6 @@ function removeDocumentFromState(state: PersistedState, documentId: string): Per
   }
 }
 
-function buildPageEntries(document: DocumentRecord | null): PageEntry[] {
-  if (!document) {
-    return []
-  }
-
-  return document.chapters.flatMap((chapter) =>
-    chapter.content
-      .filter((block) => !(block.type === 'heading' && isUtilityHeading(block.text ?? '')))
-      .map((block) => ({
-        id: block.id,
-        kind: 'block' as const,
-        chapterId: chapter.id,
-        block,
-      }))
-  )
-}
-
 function buildCurrentLocation(readerElement: HTMLDivElement | null): { chapterId: string; blockId: string } | null {
   if (!readerElement) {
     return null
@@ -280,47 +259,53 @@ function buildTocGroups(document: DocumentRecord | null): TocGroup[] {
     return []
   }
 
-  const filteredItems = document.toc.filter((item) => !isUtilityHeading(item.title))
-  const itemsByChapter = new Map<string, TocItem[]>()
+  const filtered = document.toc.filter(
+    (item) => item.title.trim() && !isUtilityHeading(item.title),
+  )
 
-  filteredItems.forEach((item) => {
-    const chapterItems = itemsByChapter.get(item.chapterId) ?? []
-    chapterItems.push(item)
-    itemsByChapter.set(item.chapterId, chapterItems)
-  })
+  if (filtered.length === 0) return []
 
-  return document.chapters
-    .map((chapter) => {
-      const chapterItems = itemsByChapter.get(chapter.id) ?? []
-      const primaryItem = chapterItems.find((item) => item.level === 1) ?? chapterItems[0]
-      const title =
-        (!isUtilityHeading(chapter.title) ? chapter.title : undefined) ??
-        primaryItem?.title ??
-        chapterItems[0]?.title ??
-        ''
+  // Group items: each level-1 item starts a new group; level 2+ items nest under it.
+  // If there are no level-1 items at all (flat doc), treat all as level-1 groups.
+  const hasLevel1 = filtered.some((item) => item.level === 1)
 
-      const blockId = primaryItem?.blockId ?? chapterItems[0]?.blockId ?? chapter.content[0]?.id ?? ''
+  if (!hasLevel1) {
+    // Fallback: every item becomes its own group with no children
+    return filtered.map((item) => ({
+      chapterId: item.chapterId,
+      title: item.title,
+      blockId: item.blockId,
+      items: [],
+    }))
+  }
 
-      const items = chapterItems.filter((item) => {
-        if (!item.title.trim()) {
-          return false
-        }
+  const groups: TocGroup[] = []
+  let current: TocGroup | null = null
 
-        if (item.id === primaryItem?.id) {
-          return false
-        }
-
-        return item.title.trim().toLowerCase() !== title.trim().toLowerCase()
-      })
-
-      return {
-        chapterId: chapter.id,
-        title,
-        blockId,
-        items,
+  for (const item of filtered) {
+    if (item.level === 1) {
+      if (current) groups.push(current)
+      current = {
+        chapterId: item.chapterId,
+        title: item.title,
+        blockId: item.blockId,
+        items: [],
       }
-    })
-    .filter((group) => group.title.trim() && group.blockId)
+    } else if (current) {
+      current.items.push(item)
+    } else {
+      // Orphaned sub-item before any level-1 — promote to group
+      groups.push({
+        chapterId: item.chapterId,
+        title: item.title,
+        blockId: item.blockId,
+        items: [],
+      })
+    }
+  }
+
+  if (current) groups.push(current)
+  return groups
 }
 
 
@@ -346,6 +331,59 @@ function renderWithSearchMatches(text: string, searchQuery: string, isActive: bo
       </mark>
     )
   })
+}
+
+// Streamdown plugins — created once at module level to avoid re-instantiation
+const SD_SHIKI_THEME: [ThemeInput, ThemeInput] = ['github-dark', 'github-dark']
+
+const sdPlugins = {
+  math: createMathPlugin({ singleDollarTextMath: true }),
+  code: createCodePlugin({ themes: SD_SHIKI_THEME }),
+  cjk: createCjkPlugin(),
+}
+
+const sdAllPlugins = { math: sdPlugins.math, code: sdPlugins.code, cjk: sdPlugins.cjk }
+const sdCodePlugins = { code: sdPlugins.code, cjk: sdPlugins.cjk }
+const sdMathPlugins = { math: sdPlugins.math }
+
+// Detect a squashed GFM table: a paragraph where the LLM/PDF importer joined
+// table rows into a single line separated by | ... | :---: | ... |
+// Returns the reconstructed multi-line markdown table, or null if not a table.
+function tryUnwrapSquashedTable(text: string): string | null {
+  // Must contain a separator cell pattern like :--- or ---:
+  if (!/\|\s*:?-{2,}:?\s*\|/.test(text)) return null
+  // Must start with | (possibly after whitespace)
+  if (!text.trimStart().startsWith('|')) return null
+
+  // Split on the row boundaries: a | that is preceded by a cell-end pattern
+  // Strategy: split on "| |" boundary (two pipes with only whitespace between row-end and row-start)
+  // The squashed form looks like: "| A | B | | :--- | :---: | | val | val |"
+  // Row boundaries appear as "| |" (end of last cell, space, start of next row)
+  const rows = text.split(/\s*\|\s*(?=\|)/)
+  if (rows.length < 2) return null
+
+  // Re-add the leading | that gets split off for each row (except first)
+  const lines = rows.map((r, i) => (i === 0 ? r.trim() : `|${r.trim()}`))
+
+  // Validate: at least header + separator + one data row
+  const separatorIndex = lines.findIndex((l) => /^\|\s*:?-{2,}/.test(l))
+  if (separatorIndex < 1) return null
+
+  return lines.join('\n')
+}
+
+// Inline renderer: renders a markdown string without adding a block-level wrapper
+function InlineMd({ text }: { text: string }) {
+  return (
+    <Streamdown
+      mode="static"
+      plugins={sdAllPlugins}
+      shikiTheme={SD_SHIKI_THEME}
+      components={{ p: ({ children }) => <>{children}</> }}
+    >
+      {text}
+    </Streamdown>
+  )
 }
 
 const ReaderBlockView = memo(function ReaderBlockView(props: {
@@ -375,6 +413,13 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
 
   const blockBase = 'mb-[1.15em] break-inside-avoid scroll-mt-6'
 
+  // For blocks with active highlights or search, fall back to plain text rendering
+  // so highlight/search overlays remain functional
+  const hasHighlights = highlights.some(
+    (h) => h.documentId === documentId && h.blockId === block.id,
+  )
+  const hasSearch = Boolean(searchQuery.trim())
+
   switch (block.type) {
     case 'heading':
       if (isUtilityHeading(block.text ?? '')) {
@@ -387,7 +432,7 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
-          {block.text}
+          {hasHighlights || hasSearch ? renderText(block.text ?? '') : <InlineMd text={block.text ?? ''} />}
         </h3>
       )
     case 'quote':
@@ -397,7 +442,7 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
-          {renderText(block.text ?? '')}
+          {hasHighlights || hasSearch ? renderText(block.text ?? '') : <InlineMd text={block.text ?? ''} />}
         </blockquote>
       )
     case 'list':
@@ -408,19 +453,56 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
           data-block-id={block.id}
         >
           {(block.items ?? []).map((item, index) => (
-            <li key={`${block.id}-${index}`}>{item}</li>
+            <li key={`${block.id}-${index}`}>
+              {hasHighlights || hasSearch ? item : <InlineMd text={item} />}
+            </li>
           ))}
         </ul>
       )
     case 'code':
       return (
-        <pre
-          className={`${blockBase} p-[18px] bg-[#050505] border border-border-subtle font-mono text-[0.92em] whitespace-pre-wrap`}
+        <div
+          className={`${blockBase}`}
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
-          <code>{block.text}</code>
-        </pre>
+          <Streamdown
+            mode="static"
+            plugins={sdCodePlugins}
+            shikiTheme={SD_SHIKI_THEME}
+            controls={false}
+          >
+            {`\`\`\`${block.language ?? 'rust'}\n${block.text ?? ''}\n\`\`\``}
+          </Streamdown>
+        </div>
+      )
+    case 'math':
+      return (
+        <div
+          className={`${blockBase} overflow-x-auto`}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
+          <Streamdown
+            mode="static"
+            plugins={sdMathPlugins}
+            controls={false}
+          >
+            {`$$\n${block.text ?? ''}\n$$`}
+          </Streamdown>
+        </div>
+      )
+    case 'table':
+      return (
+        <div
+          className={`${blockBase} overflow-x-auto`}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
+          <Streamdown mode="static" controls={false}>
+            {block.text ?? ''}
+          </Streamdown>
+        </div>
       )
     case 'image':
       return (
@@ -455,42 +537,31 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
           ) : null}
         </figure>
       )
-    default:
+    default: {
+      const text = block.text ?? ''
+      const tableMarkdown = !hasHighlights && !hasSearch ? tryUnwrapSquashedTable(text) : null
+      if (tableMarkdown) {
+        return (
+          <div
+            className={`${blockBase} overflow-x-auto`}
+            data-chapter-id={chapterId}
+            data-block-id={block.id}
+          >
+            <Streamdown mode="static" controls={false}>{tableMarkdown}</Streamdown>
+          </div>
+        )
+      }
       return (
         <p
           className={blockBase}
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
-          {renderText(block.text ?? '')}
+          {hasHighlights || hasSearch ? renderText(text) : <InlineMd text={text} />}
         </p>
       )
+    }
   }
-})
-
-const PageEntryView = memo(function PageEntryView(props: {
-  entry: PageEntry
-  documentId: string
-  highlights: Highlight[]
-  searchQuery?: string
-  activeSearchBlockId?: string
-  onPreviewImage?: (image: ImagePreviewState) => void
-}) {
-  const { entry, documentId, highlights, searchQuery, activeSearchBlockId, onPreviewImage } = props
-
-  return (
-    <div className="block" data-page-entry-id={entry.id}>
-      <ReaderBlockView
-        block={entry.block}
-        chapterId={entry.chapterId}
-        documentId={documentId}
-        highlights={highlights}
-        searchQuery={searchQuery}
-        activeSearchBlockId={activeSearchBlockId}
-        onPreviewImage={onPreviewImage}
-      />
-    </div>
-  )
 })
 
 function App() {
@@ -502,6 +573,7 @@ function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [isImporting, setIsImporting] = useState(false)
   const [deletingDocumentIds, setDeletingDocumentIds] = useState<string[]>([])
+  const [refiningDocumentIds, setRefiningDocumentIds] = useState<Set<string>>(new Set())
   const [isDragging, setIsDragging] = useState(false)
   const [librarySearchQuery, setLibrarySearchQuery] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
@@ -512,16 +584,10 @@ function App() {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null)
   const [renameDialog, setRenameDialog] = useState<{ document: DocumentRecord; value: string } | null>(null)
   const [expandedTocChapters, setExpandedTocChapters] = useState<string[]>([])
-  const [pageIndex, setPageIndex] = useState(0)
-  const [pageCount, setPageCount] = useState(1)
-  const [pages, setPages] = useState<PageEntry[][]>([])
-  const [readingModeOverride, setReadingModeOverride] = useState<ReadingMode | null>(null)
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [showOnboarding, setShowOnboarding] = useState(false)
   const readerRef = useRef<HTMLDivElement | null>(null)
-  const pageViewportRef = useRef<HTMLDivElement | null>(null)
-  const pageMeasureRef = useRef<HTMLDivElement | null>(null)
   const progressSaveTimerRef = useRef<number | null>(null)
   const preferenceSaveTimerRef = useRef<number | null>(null)
   const pendingScrollRestoreRef = useRef(false)
@@ -535,13 +601,19 @@ function App() {
 
     const bootstrap = async () => {
       try {
-        const state = await window.paperMagic.loadState()
+        const [state, refiningIds] = await Promise.all([
+          window.paperMagic.loadState(),
+          window.paperMagic.getRefiningDocumentIds(),
+        ])
         if (cancelled) {
           return
         }
 
         setPersistedState(state)
         setActiveDocumentId((current) => current ?? state.documents[0]?.id ?? null)
+        if (refiningIds.length > 0) {
+          setRefiningDocumentIds(new Set(refiningIds))
+        }
       } catch (error) {
         if (cancelled) {
           return
@@ -608,28 +680,61 @@ function App() {
   // Track which chapters have been refined mid-session so page-reset effect
   // can skip resetting position when only content changed (not document switch).
   const refinedChapterIdsRef = useRef<Set<string>>(new Set())
+  // Track per-document refinement progress: documentId → count of completed chapters
+  const docRefinementCountRef = useRef<Map<string, number>>(new Map())
 
   // Listen for chapter refinement updates and swap content in state
   useEffect(() => {
     const unsub = window.paperMagic.onChapterRefined((update: ChapterRefinementUpdate) => {
       refinedChapterIdsRef.current.add(update.chapterId)
+
+      // Ensure the doc appears as refining (handles rerun case too).
+      // If it wasn't already tracked, reset its completion counter (new run).
+      setRefiningDocumentIds((prev) => {
+        if (prev.has(update.documentId)) return prev
+        docRefinementCountRef.current.set(update.documentId, 0)
+        const next = new Set(prev)
+        next.add(update.documentId)
+        return next
+      })
+
+      // Track completion to remove doc from refining set when all chapters done
+      const prevCount = docRefinementCountRef.current.get(update.documentId) ?? 0
+      docRefinementCountRef.current.set(update.documentId, prevCount + 1)
+
       // Use startTransition so the content swap is low-priority and doesn't
       // interrupt the user's current interaction/scroll.
       startTransition(() => {
         setPersistedState((current) => {
           if (!current) return current
-          return {
-            ...current,
-            documents: current.documents.map((doc) => {
-              if (doc.id !== update.documentId) return doc
-              return {
-                ...doc,
-                chapters: doc.chapters.map((ch) =>
-                  ch.id === update.chapterId ? { ...ch, content: update.refinedContent } : ch
-                ),
-              }
-            }),
+          const updatedDocs = current.documents.map((doc) => {
+            if (doc.id !== update.documentId) return doc
+            const updatedChapters = doc.chapters.map((ch) =>
+              ch.id === update.chapterId ? { ...ch, content: update.refinedContent } : ch
+            )
+            // Rebuild TOC so navigation reflects refined headings
+            return {
+              ...doc,
+              chapters: updatedChapters,
+              toc: buildToc(updatedChapters),
+            }
+          })
+
+          // Remove from refining set if all chapters for this doc are resolved
+          const doc = updatedDocs.find((d) => d.id === update.documentId)
+          if (doc) {
+            const completedCount = docRefinementCountRef.current.get(update.documentId) ?? 0
+            if (completedCount >= doc.chapters.length) {
+              docRefinementCountRef.current.delete(update.documentId)
+              setRefiningDocumentIds((prev) => {
+                const next = new Set(prev)
+                next.delete(update.documentId)
+                return next
+              })
+            }
           }
+
+          return { ...current, documents: updatedDocs }
         })
       })
     })
@@ -753,9 +858,6 @@ function App() {
       return rightTimestamp - leftTimestamp
     })
   }, [persistedState])
-  const activeReadingMode: ReadingMode = readingModeOverride ?? activeProgress?.readingMode ?? activeDocument?.preferredMode ?? 'page'
-  const pageEntries = useMemo(() => buildPageEntries(activeDocument), [activeDocument])
-  const pageEntryById = useMemo(() => new Map(pageEntries.map((entry) => [entry.id, entry])), [pageEntries])
   const documentHighlights = useMemo(
     () =>
       activeDocument && persistedState
@@ -798,35 +900,6 @@ function App() {
       return haystack.includes(normalizedQuery)
     })
   }, [deferredLibrarySearchQuery, libraryDocuments])
-  const blockPageIndex = useMemo(() => {
-    const nextMap = new Map<string, number>()
-
-    pages.forEach((page, nextPageIndex) => {
-      page.forEach((entry) => {
-        if (entry.kind === 'block') {
-          nextMap.set(entry.block.id, nextPageIndex)
-        }
-      })
-    })
-
-    return nextMap
-  }, [pages])
-  const pageMeasureContent = useMemo(
-    () =>
-      activeDocument
-        ? pageEntries.map((entry) => (
-            <PageEntryView
-              key={`measure-${entry.id}`}
-              entry={entry}
-              documentId={activeDocument.id}
-              highlights={documentHighlights}
-            />
-          ))
-        : null,
-    [activeDocument, documentHighlights, pageEntries],
-  )
-
-
   const prevDocumentIdRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -843,132 +916,10 @@ function App() {
 
     prevDocumentIdRef.current = activeDocument.id
     refinedChapterIdsRef.current.clear()
-
-    if (activeReadingMode === 'page') {
-      setPageIndex(activeProgress?.pageIndex ?? 0)
-      return
-    }
-
-    setPageIndex(0)
-    setPageCount(1)
-    setPages([])
-  }, [activeDocument, activeProgress?.pageIndex, activeReadingMode])
-
-  useEffect(() => {
-    if (!activeDocument || activeReadingMode !== 'page' || pages.length === 0) {
-      return
-    }
-
-    const currentPage = pages[pageIndex] ?? pages[0]
-    const firstBlock = currentPage?.find((entry) => entry.kind === 'block')
-    if (!firstBlock || firstBlock.kind !== 'block') {
-      return
-    }
-
-    queueProgressSave({
-      documentId: activeDocument.id,
-      progress: pageCount <= 1 ? 1 : pageIndex / (pageCount - 1),
-      chapterId: firstBlock.chapterId,
-      blockId: firstBlock.block.id,
-      pageIndex,
-      readingMode: 'page',
-      lastOpenedAt: new Date().toISOString(),
-    })
-  }, [activeDocument, activeReadingMode, pageCount, pageIndex, pages, queueProgressSave])
+  }, [activeDocument])
 
   useLayoutEffect(() => {
-    if (mode !== 'reader' || activeReadingMode !== 'page') {
-      return
-    }
-
-    const viewportElement = pageViewportRef.current
-    const measureElement = pageMeasureRef.current
-    if (!viewportElement || !measureElement) {
-      return
-    }
-
-    let animationFrame = 0
-
-    const runMeasurement = () => {
-      const pageHeight = viewportElement.clientHeight
-      const entryElements = Array.from(measureElement.querySelectorAll<HTMLElement>('[data-page-entry-id]'))
-
-      if (pageHeight <= 0 || entryElements.length === 0) {
-        setPages(pageEntries.length > 0 ? [pageEntries] : [])
-        setPageCount(1)
-        return
-      }
-
-      const nextPages: PageEntry[][] = []
-      let currentPage: PageEntry[] = []
-      let currentPageLimit = entryElements[0].offsetTop + pageHeight
-
-      entryElements.forEach((element) => {
-        const entryId = element.dataset.pageEntryId
-        const entry = entryId ? pageEntryById.get(entryId) : undefined
-        if (!entry) {
-          return
-        }
-
-        const entryBottom = element.offsetTop + element.offsetHeight
-        if (currentPage.length > 0 && entryBottom > currentPageLimit) {
-          nextPages.push(currentPage)
-          currentPage = []
-          currentPageLimit = element.offsetTop + pageHeight
-        }
-
-        currentPage.push(entry)
-
-        if (currentPage.length === 1 && entryBottom > currentPageLimit) {
-          currentPageLimit = entryBottom
-        }
-      })
-
-      if (currentPage.length > 0) {
-        nextPages.push(currentPage)
-      }
-
-      const resolvedPages = nextPages.length > 0 ? nextPages : [pageEntries]
-      setPages(resolvedPages)
-      setPageCount(resolvedPages.length)
-      setPageIndex((currentPageIndex) => clamp(currentPageIndex, 0, resolvedPages.length - 1))
-    }
-
-    const measurePages = () => {
-      if (animationFrame) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-
-      animationFrame = window.requestAnimationFrame(runMeasurement)
-    }
-
-    runMeasurement()
-
-    const resizeObserver = new ResizeObserver(measurePages)
-    resizeObserver.observe(viewportElement)
-    resizeObserver.observe(measureElement)
-    window.addEventListener('resize', measurePages)
-
-    return () => {
-      if (animationFrame) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', measurePages)
-    }
-  }, [
-    activeDocument?.id,
-    activeReadingMode,
-    mode,
-    pageEntryById,
-    pageEntries,
-    persistedState?.preferences.fontSize,
-    persistedState?.preferences.readingWidth,
-  ])
-
-  useLayoutEffect(() => {
-    if (!pendingScrollRestoreRef.current || !activeDocumentId || mode !== 'reader' || activeReadingMode !== 'scroll') {
+    if (!pendingScrollRestoreRef.current || !activeDocumentId || mode !== 'reader') {
       return
     }
 
@@ -985,7 +936,7 @@ function App() {
 
     pendingScrollRestoreRef.current = false
     target.scrollIntoView({ block: 'start' })
-  }, [activeDocumentId, activeProgress?.blockId, activeReadingMode, mode])
+  }, [activeDocumentId, activeProgress?.blockId, mode])
 
   const openDocument = (documentId: string) => {
     if (!persistedState) {
@@ -1004,12 +955,11 @@ function App() {
     setSearchQuery('')
     setSelectionDraft(null)
     setPreviewImage(null)
-    setReadingModeOverride(null)
 
     const existingProgress = persistedState.progress.find((progress) => progress.documentId === documentId)
     const fallbackBlock = document.chapters[0]?.content[0]
     const fallbackChapter = document.chapters[0]
-    pendingScrollRestoreRef.current = (existingProgress?.readingMode ?? document.preferredMode ?? 'page') === 'scroll'
+    pendingScrollRestoreRef.current = Boolean(existingProgress)
 
     if (fallbackBlock && fallbackChapter) {
       queueProgressSave({
@@ -1017,8 +967,8 @@ function App() {
         progress: existingProgress?.progress ?? 0,
         chapterId: existingProgress?.chapterId ?? fallbackChapter.id,
         blockId: existingProgress?.blockId ?? fallbackBlock.id,
-        pageIndex: existingProgress?.pageIndex ?? 0,
-        readingMode: existingProgress?.readingMode ?? 'page',
+        pageIndex: 0,
+        readingMode: 'scroll',
         lastOpenedAt: new Date().toISOString(),
       })
     }
@@ -1083,7 +1033,7 @@ function App() {
   }
 
   const handleReaderScroll = () => {
-    if (!readerRef.current || !activeDocument || activeReadingMode !== 'scroll') {
+    if (!readerRef.current || !activeDocument) {
       return
     }
 
@@ -1112,14 +1062,6 @@ function App() {
       return
     }
 
-    if (activeReadingMode === 'page') {
-      const nextPageIndex = blockPageIndex.get(blockId)
-      if (nextPageIndex !== undefined) {
-        setPageIndex(nextPageIndex)
-      }
-      return
-    }
-
     const target = readerRef.current?.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`)
     if (!target) {
       return
@@ -1139,44 +1081,6 @@ function App() {
       readingMode: 'scroll',
       lastOpenedAt: new Date().toISOString(),
     })
-  }
-
-  const setReadingMode = (nextMode: ReadingMode) => {
-    if (!activeDocument) {
-      return
-    }
-
-    const fallbackBlock = activeDocument.chapters[0]?.content[0]
-    const fallbackChapter = activeDocument.chapters[0]
-
-    if (!fallbackBlock || !fallbackChapter) {
-      return
-    }
-
-    pendingScrollRestoreRef.current = nextMode === 'scroll'
-    setReadingModeOverride(nextMode)
-
-    queueProgressSave({
-      documentId: activeDocument.id,
-      progress: activeProgress?.progress ?? 0,
-      chapterId: activeProgress?.chapterId ?? fallbackChapter.id,
-      blockId: activeProgress?.blockId ?? fallbackBlock.id,
-      pageIndex: activeProgress?.pageIndex ?? 0,
-      readingMode: nextMode,
-      lastOpenedAt: new Date().toISOString(),
-    })
-  }
-
-  const toggleReadingMode = () => {
-    setReadingMode(activeReadingMode === 'scroll' ? 'page' : 'scroll')
-  }
-
-  const changePage = (delta: number) => {
-    setPageIndex((currentPageIndex) => clamp(currentPageIndex + delta, 0, Math.max(0, pageCount - 1)))
-  }
-
-  const jumpToBoundaryPage = (nextPageIndex: number) => {
-    setPageIndex(clamp(nextPageIndex, 0, Math.max(0, pageCount - 1)))
   }
 
   const handleRemoveDocument = async (document: DocumentRecord) => {
@@ -1407,7 +1311,6 @@ function App() {
   }
 
   const readerHotkeysEnabled = mode === 'reader' && Boolean(activeDocument)
-  const pageModeHotkeysEnabled = readerHotkeysEnabled && activeReadingMode === 'page'
 
   useHotkey(
     'Mod+F',
@@ -1491,14 +1394,6 @@ function App() {
   )
 
   useHotkey(
-    'Mod+Shift+M',
-    () => {
-      toggleReadingMode()
-    },
-    { enabled: readerHotkeysEnabled },
-  )
-
-  useHotkey(
     'Mod+H',
     () => {
       void toggleHighlightAtSelection()
@@ -1517,11 +1412,6 @@ function App() {
   useHotkey(
     'J',
     () => {
-      if (activeReadingMode === 'page') {
-        changePage(1)
-        return
-      }
-
       readerRef.current?.scrollBy({ top: 160, behavior: 'smooth' })
     },
     { enabled: readerHotkeysEnabled },
@@ -1530,30 +1420,9 @@ function App() {
   useHotkey(
     'K',
     () => {
-      if (activeReadingMode === 'page') {
-        changePage(-1)
-        return
-      }
-
       readerRef.current?.scrollBy({ top: -160, behavior: 'smooth' })
     },
     { enabled: readerHotkeysEnabled },
-  )
-
-  useHotkey(
-    'H',
-    () => {
-      changePage(-1)
-    },
-    { enabled: pageModeHotkeysEnabled },
-  )
-
-  useHotkey(
-    'L',
-    () => {
-      changePage(1)
-    },
-    { enabled: pageModeHotkeysEnabled },
   )
 
   useHotkey(
@@ -1583,14 +1452,6 @@ function App() {
     'B',
     () => {
       void addBookmark()
-    },
-    { enabled: readerHotkeysEnabled },
-  )
-
-  useHotkey(
-    'M',
-    () => {
-      toggleReadingMode()
     },
     { enabled: readerHotkeysEnabled },
   )
@@ -1653,11 +1514,6 @@ function App() {
   useHotkey(
     'Space',
     () => {
-      if (activeReadingMode === 'page') {
-        changePage(1)
-        return
-      }
-
       setActivePanel(null)
       readerRef.current?.scrollBy({ top: window.innerHeight * 0.85, behavior: 'smooth' })
     },
@@ -1665,45 +1521,8 @@ function App() {
   )
 
   useHotkey(
-    'ArrowRight',
-    () => {
-      changePage(1)
-    },
-    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
-  )
-
-  useHotkey(
-    'ArrowLeft',
-    () => {
-      changePage(-1)
-    },
-    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
-  )
-
-  useHotkey(
-    'PageDown',
-    () => {
-      changePage(1)
-    },
-    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
-  )
-
-  useHotkey(
-    'PageUp',
-    () => {
-      changePage(-1)
-    },
-    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
-  )
-
-  useHotkey(
     'Shift+G',
     () => {
-      if (activeReadingMode === 'page') {
-        jumpToBoundaryPage(Math.max(0, pageCount - 1))
-        return
-      }
-
       const readerElement = readerRef.current
       if (!readerElement) {
         return
@@ -1717,11 +1536,6 @@ function App() {
   useHotkeySequence(
     ['G', 'G'],
     () => {
-      if (activeReadingMode === 'page') {
-        jumpToBoundaryPage(0)
-        return
-      }
-
       readerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
     },
     { enabled: readerHotkeysEnabled, timeout: 900 },
@@ -1787,7 +1601,6 @@ function App() {
   }
 
   const visibleReaderPanel = activePanel ?? 'toc'
-  const currentPageEntries = pages[pageIndex] ?? pages[0] ?? []
   const readerTabs = [
     { id: 'toc' as const, label: 'Contents', icon: ListIcon, shortcut: 'Mod+T' },
     { id: 'notes' as const, label: 'Notes', icon: NotebookPenIcon, shortcut: 'N' },
@@ -1897,6 +1710,7 @@ function App() {
                     const progressValue = progress?.progress ?? 0
                     const progressWidth = `${Math.max(0, Math.min(100, progressValue * 100))}%`
                     const isDeletingDocument = deletingDocumentIds.includes(document.id)
+                    const isRefining = refiningDocumentIds.has(document.id)
                     return (
                       <ContextMenu
                         key={document.id}
@@ -1947,6 +1761,12 @@ function App() {
                             <SourceIcon sourceType={document.sourceType} size={14} strokeWidth={1.9} />
                             {sourceLabel(document.sourceType)}
                           </span>
+                          {isRefining ? (
+                            <span className="relative z-[1] inline-flex self-end items-center gap-1.5 px-2 py-[5px] border border-white/[0.12] bg-black/60 text-white/[0.7] text-[0.68rem] tracking-[0.06em] uppercase">
+                              <Loader2Icon size={11} strokeWidth={2} className="animate-spin" />
+                              Refining
+                            </span>
+                          ) : null}
                         </div>
                         {/* Document meta */}
                         <div className="min-w-0 flex flex-col gap-[10px]">
@@ -2034,7 +1854,7 @@ function App() {
               <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                 {/* Tab bar */}
                 <div
-                  className="grid grid-cols-3 border-b border-border-subtle max-sm:sticky max-sm:top-0 max-sm:bg-[#000]"
+                  className="grid grid-cols-2 border-b border-border-subtle max-sm:sticky max-sm:top-0 max-sm:bg-[#000]"
                   role="tablist"
                   aria-label="Reader panels"
                 >
@@ -2059,39 +1879,11 @@ function App() {
                   })}
                 </div>
 
-                {/* Mode row */}
-                <div className="flex items-center justify-between gap-3 px-[18px] pb-[18px] pt-3 border-b border-border-subtle max-sm:px-[18px]">
-                  <div className="flex items-center min-h-[42px] text-text-muted text-[0.88rem] tracking-[0.03em] tabular-nums">
-                    <span>
-                      {activeReadingMode === 'page'
-                        ? `Page ${pageIndex + 1} / ${pageCount}`
-                        : formatPercent(activeProgress?.progress ?? 0)}
-                    </span>
-                  </div>
-                  <div
-                    className="inline-flex items-center border border-border-subtle bg-[#030303]"
-                    role="tablist"
-                    aria-label="Reading mode"
-                  >
-                    <Tooltip content="Page mode" shortcut="Mod+Shift+M" side="bottom">
-                      <button
-                        className={`inline-flex items-center justify-center w-10 h-10 border-0 cursor-pointer font-[inherit] outline-none transition-[background,color] duration-[160ms] ${activeReadingMode === 'page' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
-                        onClick={() => setReadingMode('page')}
-                        aria-label="Use paged reading mode"
-                      >
-                        <BookOpenIcon size={15} strokeWidth={1.9} aria-hidden="true" />
-                      </button>
-                    </Tooltip>
-                    <Tooltip content="Scroll mode" shortcut="Mod+Shift+M" side="bottom">
-                      <button
-                        className={`inline-flex items-center justify-center w-10 h-10 border-0 border-l border-border-subtle cursor-pointer font-[inherit] outline-none transition-[background,color] duration-[160ms] ${activeReadingMode === 'scroll' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
-                        onClick={() => setReadingMode('scroll')}
-                        aria-label="Use scroll reading mode"
-                      >
-                        <AlignJustifyIcon size={15} strokeWidth={1.9} aria-hidden="true" />
-                      </button>
-                    </Tooltip>
-                  </div>
+                {/* Progress row */}
+                <div className="flex items-center px-[18px] pb-[18px] pt-3 border-b border-border-subtle">
+                  <span className="text-text-muted text-[0.88rem] tracking-[0.03em] tabular-nums">
+                    {formatPercent(activeProgress?.progress ?? 0)}
+                  </span>
                 </div>
 
                 {/* TOC panel */}
@@ -2118,7 +1910,7 @@ function App() {
                         return (
                           <section key={group.chapterId} className="grid gap-2">
                             <button
-                              className={`w-full px-[13px] py-3 flex items-center gap-[10px] border border-border-subtle bg-white/[0.02] text-text-primary text-left transition-[border-color,background] duration-[160ms] cursor-pointer font-[inherit] outline-none hover:border-border-strong hover:bg-white/[0.04] ${isActiveChapter || isExpanded ? 'border-border-strong bg-white/[0.06]' : ''}`}
+                              className={`w-full px-[13px] py-3 flex items-center gap-[10px] border border-border-subtle bg-white/[0.02] text-text-primary text-left transition-[border-color,background] duration-[160ms] cursor-pointer font-[inherit] outline-none hover:border-border-strong hover:bg-white/[0.04] overflow-hidden ${isActiveChapter || isExpanded ? 'border-border-strong bg-white/[0.06]' : ''}`}
                               aria-expanded={isExpanded}
                               onClick={() => {
                                 if (group.items.length === 0) {
@@ -2133,14 +1925,14 @@ function App() {
                                 )
                               }}
                             >
-                              <span className="min-w-0 inline-flex items-center gap-[10px]">
+                              <span className="min-w-0 inline-flex items-center gap-[10px] overflow-hidden">
                                 <ChevronRightIcon
                                   className={`shrink-0 transition-transform duration-[160ms] ${isExpanded ? 'rotate-90' : ''}`}
                                   size={15}
                                   strokeWidth={1.9}
                                   aria-hidden="true"
                                 />
-                                <span className="min-w-0">{group.title}</span>
+                                <span className="min-w-0 truncate">{group.title}</span>
                               </span>
                             </button>
                             {isExpanded ? (
@@ -2151,9 +1943,9 @@ function App() {
                                     className={`${listItemBase} ${listItemHover} flex items-center gap-[10px] ${item.level === 2 ? 'pl-3' : item.level === 3 ? 'pl-[18px]' : ''} ${activeProgress?.blockId === item.blockId ? listItemActive : ''}`}
                                     onClick={() => jumpToLocation(item.chapterId, item.blockId)}
                                   >
-                                    <span className="min-w-0 inline-flex items-center gap-[9px]">
+                                    <span className="min-w-0 inline-flex items-center gap-[9px] overflow-hidden">
                                       <ListIcon size={13} strokeWidth={1.9} aria-hidden="true" className="shrink-0" />
-                                      <span className="min-w-0">{item.title}</span>
+                                      <span className="min-w-0 truncate">{item.title}</span>
                                     </span>
                                   </button>
                                 ))}
@@ -2294,7 +2086,7 @@ function App() {
           {/* Reader surface */}
           <div
             ref={readerRef}
-            className={`overflow-y-auto relative ${activeReadingMode === 'page' ? 'h-screen overflow-hidden p-0' : 'min-h-screen py-6 pb-[88px] max-sm:pt-5'}`}
+            className="overflow-y-auto relative min-h-screen py-6 pb-[88px] max-sm:pt-5"
             onScroll={handleReaderScroll}
             onMouseUp={handleSelectionChange}
             onKeyUp={handleSelectionChange}
@@ -2313,83 +2105,33 @@ function App() {
               </Tooltip>
             ) : null}
             <div
-              className={`w-[min(100%,var(--reader-width,840px))] mx-auto font-reading leading-[1.78] ${activeReadingMode === 'page' ? 'flex flex-col h-screen px-10 pt-[26px] pb-[18px] max-sm:px-[18px] max-sm:pt-5 max-sm:pb-[14px]' : 'px-10 pt-8 pb-12 max-sm:px-[18px] max-sm:pb-10'}`}
+              className="w-[min(100%,var(--reader-width,840px))] mx-auto font-reading leading-[1.78] px-10 pt-8 pb-12 max-sm:px-[18px] max-sm:pb-10"
               style={readerColumnStyle}
             >
-              {activeReadingMode === 'scroll'
-                ? activeDocument.chapters.map((chapter) => (
-                    <section
-                      key={chapter.id}
-                      className="[content-visibility:auto] [contain-intrinsic-size:900px] [&+&]:mt-14"
-                    >
-                      {!isUtilityHeading(chapter.title) ? (
-                        <h2 className="m-0 mb-5 text-[0.78rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
-                          {chapter.title}
-                        </h2>
-                      ) : null}
-                      {chapter.content.map((block) => (
-                        <ReaderBlockView
-                          key={block.id}
-                          block={block}
-                          chapterId={chapter.id}
-                          documentId={activeDocument.id}
-                          highlights={documentHighlights}
-                          searchQuery={isReaderSearchOpen ? searchQuery : ''}
-                          activeSearchBlockId={activeSearchBlockId}
-                          onPreviewImage={setPreviewImage}
-                        />
-                      ))}
-                    </section>
-                  ))
-                : (
-                    <div className="relative flex flex-1 flex-col gap-[10px]">
-                      <div ref={pageViewportRef} className="flex-1 min-h-0 overflow-hidden">
-                        <article className={`h-full overflow-hidden ${pages.length === 0 ? 'invisible' : ''}`}>
-                          {currentPageEntries.map((entry) => (
-                            <PageEntryView
-                              key={entry.id}
-                              entry={entry}
-                              documentId={activeDocument.id}
-                              highlights={documentHighlights}
-                              searchQuery={isReaderSearchOpen ? searchQuery : ''}
-                              activeSearchBlockId={activeSearchBlockId}
-                              onPreviewImage={setPreviewImage}
-                            />
-                          ))}
-                        </article>
-                      </div>
-                      <div className={`mt-auto flex justify-center items-center gap-3 text-text-muted font-ui text-[0.9rem] tabular-nums max-sm:flex-col max-sm:items-stretch ${pages.length === 0 ? 'invisible' : ''}`}>
-                        <Button
-                          variant="secondary"
-                          size="md"
-                          className="w-10 px-0"
-                          onClick={() => changePage(-1)}
-                          aria-label="Previous page"
-                        >
-                          <ChevronLeftIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                        </Button>
-                        <span className="min-w-[12ch] text-center">
-                          Page {Math.min(pageIndex + 1, Math.max(1, pageCount))} of {Math.max(1, pageCount)}
-                        </span>
-                        <Button
-                          variant="secondary"
-                          size="md"
-                          className="w-10 px-0"
-                          onClick={() => changePage(1)}
-                          aria-label="Next page"
-                        >
-                          <ChevronRightIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                        </Button>
-                      </div>
-                      <div
-                        ref={pageMeasureRef}
-                        className="absolute inset-0 -z-[1] overflow-hidden invisible pointer-events-none"
-                        aria-hidden="true"
-                      >
-                        <article className="h-auto">{pageMeasureContent}</article>
-                      </div>
-                    </div>
-                  )}
+              {activeDocument.chapters.map((chapter) => (
+                <section
+                  key={chapter.id}
+                  className="[content-visibility:auto] [contain-intrinsic-size:900px] [&+&]:mt-14"
+                >
+                  {!isUtilityHeading(chapter.title) ? (
+                    <h2 className="m-0 mb-5 text-[0.78rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
+                      {chapter.title}
+                    </h2>
+                  ) : null}
+                  {chapter.content.map((block) => (
+                    <ReaderBlockView
+                      key={block.id}
+                      block={block}
+                      chapterId={chapter.id}
+                      documentId={activeDocument.id}
+                      highlights={documentHighlights}
+                      searchQuery={isReaderSearchOpen ? searchQuery : ''}
+                      activeSearchBlockId={activeSearchBlockId}
+                      onPreviewImage={setPreviewImage}
+                    />
+                  ))}
+                </section>
+              ))}
             </div>
           </div>
 
