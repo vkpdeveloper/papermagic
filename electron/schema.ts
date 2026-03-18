@@ -5,6 +5,7 @@ export const documentsTable = sqliteTable('documents', {
   title: text('title').notNull(),
   author: text('author').notNull(),
   coverHue: integer('cover_hue').notNull(),
+  coverImageUrl: text('cover_image_url'),
   sourceType: text('source_type').notNull(),
   description: text('description').notNull(),
   tocJson: text('toc_json').notNull(),
@@ -54,6 +55,14 @@ export const preferencesTable = sqliteTable('preferences', {
   readingWidth: integer('reading_width').notNull(),
 })
 
+export const settingsTable = sqliteTable('app_settings', {
+  id: integer('id').primaryKey(),
+  aiEnabled: integer('ai_enabled', { mode: 'boolean' }).notNull().default(false),
+  aiProvider: text('ai_provider'),
+  aiModel: text('ai_model'),
+  aiApiKey: text('ai_api_key'),
+})
+
 export const schema = {
   bookmarksTable,
   chaptersTable,
@@ -61,4 +70,5 @@ export const schema = {
   highlightsTable,
   preferencesTable,
   progressTable,
+  settingsTable,
 }

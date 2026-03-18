@@ -2,9 +2,14 @@ import { defineConfig } from 'vite'
 import path from 'node:path'
 import electron from 'vite-plugin-electron/simple'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 const electronRuntimeDependencies = [
+  '@google/gemini-cli-core',
+  '@napi-rs/canvas',
   '@steipete/summarize',
+  'ai',
+  'ai-sdk-provider-gemini-cli',
   'better-sqlite3',
   'drizzle-orm',
   'drizzle-orm/better-sqlite3',
@@ -12,11 +17,13 @@ const electronRuntimeDependencies = [
   'jszip',
   'linkedom',
   'pdfjs-dist/legacy/build/pdf.mjs',
+  'web-tree-sitter',
 ]
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
+    tailwindcss(),
     react(),
     electron({
       main: {

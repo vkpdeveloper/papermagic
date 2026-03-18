@@ -1,21 +1,58 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import './App.css'
-import { buildSearchResults, flattenDocument } from './content'
+import {
+  memo,
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { useHotkey, useHotkeySequence } from '@tanstack/react-hotkeys'
+import {
+  AlignJustify as AlignJustifyIcon,
+  BookOpen as BookOpenIcon,
+  Bookmark as BookmarkIcon,
+  ChevronLeft as ChevronLeftIcon,
+  ChevronRight as ChevronRightIcon,
+  FileText as FileTextIcon,
+  Globe as GlobeIcon,
+  Highlighter as HighlighterIcon,
+  List as ListIcon,
+  NotebookPen as NotebookPenIcon,
+  PanelLeftClose as PanelLeftCloseIcon,
+  PanelLeftOpen as PanelLeftOpenIcon,
+  Search as SearchIcon,
+  Settings as SettingsIcon,
+  Trash2 as TrashIcon,
+  Upload as UploadIcon,
+  X as XIcon,
+} from 'lucide-react'
+import { toast } from 'sonner'
+import { buildSearchResults, isUtilityHeading } from './content'
 import { defaultPreferences } from './storage'
 import type {
   AppMode,
   Bookmark,
   DocumentRecord,
-  FlatBlock,
   Highlight,
   PersistedState,
   ReaderBlock,
   ReadingMode,
   ReadingProgress,
-  SearchResult,
+  TocItem,
 } from './types'
+import { ConfirmDialog } from './components/ConfirmDialog'
+import { DropOverlay } from './components/DropOverlay'
+import { ImageLightbox } from './components/ImageLightbox'
+import { SelectionPopover } from './components/SelectionPopover'
+import { ReaderSearchBar } from './components/ReaderSearchBar'
+import { SettingsPage } from './components/SettingsPage'
+import { Tooltip, TooltipProvider } from './components/ui/Tooltip'
+import { ContextMenu } from './components/ui/ContextMenu'
 
-type ReaderPanel = 'toc' | 'search' | 'notes' | null
+type ReaderPanel = 'toc' | 'notes' | null
 
 interface SelectionDraft {
   chapterId: string
@@ -24,6 +61,40 @@ interface SelectionDraft {
   x: number
   y: number
 }
+
+interface ImagePreviewState {
+  src: string
+  alt: string
+  caption?: string
+}
+
+interface ConfirmDialogState {
+  title: string
+  message: string
+  confirmLabel?: string
+  onConfirm: () => void
+}
+
+interface TocGroup {
+  chapterId: string
+  title: string
+  blockId: string
+  items: TocItem[]
+}
+
+type PageEntry =
+  | {
+      id: string
+      kind: 'chapter'
+      chapterId: string
+      title: string
+    }
+  | {
+      id: string
+      kind: 'block'
+      chapterId: string
+      block: ReaderBlock
+    }
 
 type DroppedFile = File & {
   path?: string
@@ -44,11 +115,36 @@ function formatDate(value: string): string {
   }).format(new Date(value))
 }
 
+async function toggleFullscreen(): Promise<void> {
+  if (!document.fullscreenElement) {
+    await document.documentElement.requestFullscreen()
+    return
+  }
+
+  await document.exitFullscreen()
+}
+
 function coverStyle(document: DocumentRecord): React.CSSProperties {
   return {
     background: `linear-gradient(145deg, hsl(${document.coverHue} 50% 18%), hsl(${(document.coverHue + 26) % 360} 44% 10%))`,
     boxShadow: `inset 0 1px 0 hsla(${document.coverHue} 85% 80% / 0.14)`,
   }
+}
+
+function resolveDocumentCoverImage(document: DocumentRecord): string | undefined {
+  if (document.metadata.coverImageUrl) {
+    return document.metadata.coverImageUrl
+  }
+
+  for (const chapter of document.chapters) {
+    const firstImage = chapter.content.find((block) => block.type === 'image' && block.src)
+
+    if (firstImage?.src) {
+      return firstImage.src
+    }
+  }
+
+  return undefined
 }
 
 function upsertProgress(items: ReadingProgress[], progress: ReadingProgress): ReadingProgress[] {
@@ -95,60 +191,71 @@ function renderWithHighlights(text: string, highlights: Highlight[], documentId:
       return <span key={`${blockId}-${index}`}>{part}</span>
     }
 
-    return <mark key={`${blockId}-${index}`}>{part}</mark>
+    return <mark key={`${blockId}-${index}`} className="px-[0.14em] py-[0.06em] bg-white/[0.16] text-text-primary">{part}</mark>
   })
-}
-
-function buildPages(flatBlocks: FlatBlock[]) {
-  const pages: FlatBlock[][] = []
-  let currentPage: FlatBlock[] = []
-  let weight = 0
-
-  const blockWeight = (block: ReaderBlock) => {
-    switch (block.type) {
-      case 'heading':
-        return 1
-      case 'list':
-        return 2
-      case 'code':
-        return 3
-      case 'quote':
-        return 2
-      case 'image':
-        return 4
-      default:
-        return 2
-    }
-  }
-
-  flatBlocks.forEach((flatBlock) => {
-    const nextWeight = blockWeight(flatBlock.block)
-    if (currentPage.length > 0 && weight + nextWeight > 9) {
-      pages.push(currentPage)
-      currentPage = []
-      weight = 0
-    }
-
-    currentPage.push(flatBlock)
-    weight += nextWeight
-  })
-
-  if (currentPage.length > 0) {
-    pages.push(currentPage)
-  }
-
-  return pages
 }
 
 function sourceLabel(sourceType: DocumentRecord['sourceType']): string {
   switch (sourceType) {
     case 'epub':
-      return 'Book'
+      return 'EPUB'
     case 'pdf':
-      return 'Article'
+      return 'PDF'
     default:
-      return 'Web'
+      return 'URL'
   }
+}
+
+function documentAuthorLabel(document: DocumentRecord): string {
+  const placeholderAuthors = new Set(['PDF import', 'EPUB import'])
+  return placeholderAuthors.has(document.author) ? 'Unknown author' : document.author
+}
+
+function SourceIcon(props: {
+  sourceType: DocumentRecord['sourceType']
+  size?: number
+  strokeWidth?: number
+}) {
+  const { sourceType, size = 16, strokeWidth = 1.8 } = props
+  const Icon = sourceType === 'epub' ? BookOpenIcon : sourceType === 'pdf' ? FileTextIcon : GlobeIcon
+  return <Icon size={size} strokeWidth={strokeWidth} aria-hidden="true" />
+}
+
+function removeDocumentFromState(state: PersistedState, documentId: string): PersistedState {
+  return {
+    ...state,
+    documents: state.documents.filter((document) => document.id !== documentId),
+    progress: state.progress.filter((progress) => progress.documentId !== documentId),
+    highlights: state.highlights.filter((highlight) => highlight.documentId !== documentId),
+    bookmarks: state.bookmarks.filter((bookmark) => bookmark.documentId !== documentId),
+  }
+}
+
+function buildPageEntries(document: DocumentRecord | null): PageEntry[] {
+  if (!document) {
+    return []
+  }
+
+  return document.chapters.flatMap((chapter) => [
+    ...(!isUtilityHeading(chapter.title)
+      ? [
+          {
+            id: `${chapter.id}-title`,
+            kind: 'chapter' as const,
+            chapterId: chapter.id,
+            title: chapter.title,
+          },
+        ]
+      : []),
+    ...chapter.content
+      .filter((block) => !(block.type === 'heading' && isUtilityHeading(block.text ?? '')))
+      .map((block) => ({
+        id: block.id,
+        kind: 'block' as const,
+        chapterId: chapter.id,
+        block,
+      })),
+  ])
 }
 
 function buildCurrentLocation(readerElement: HTMLDivElement | null): { chapterId: string; blockId: string } | null {
@@ -182,30 +289,138 @@ function buildCurrentLocation(readerElement: HTMLDivElement | null): { chapterId
   return { chapterId, blockId }
 }
 
-function ReaderBlockView(props: {
+function buildTocGroups(document: DocumentRecord | null): TocGroup[] {
+  if (!document) {
+    return []
+  }
+
+  const filteredItems = document.toc.filter((item) => !isUtilityHeading(item.title))
+  const itemsByChapter = new Map<string, TocItem[]>()
+
+  filteredItems.forEach((item) => {
+    const chapterItems = itemsByChapter.get(item.chapterId) ?? []
+    chapterItems.push(item)
+    itemsByChapter.set(item.chapterId, chapterItems)
+  })
+
+  return document.chapters
+    .map((chapter) => {
+      const chapterItems = itemsByChapter.get(chapter.id) ?? []
+      const primaryItem = chapterItems.find((item) => item.level === 1) ?? chapterItems[0]
+      const title =
+        (!isUtilityHeading(chapter.title) ? chapter.title : undefined) ??
+        primaryItem?.title ??
+        chapterItems[0]?.title ??
+        ''
+
+      const blockId = primaryItem?.blockId ?? chapterItems[0]?.blockId ?? chapter.content[0]?.id ?? ''
+
+      const items = chapterItems.filter((item) => {
+        if (!item.title.trim()) {
+          return false
+        }
+
+        if (item.id === primaryItem?.id) {
+          return false
+        }
+
+        return item.title.trim().toLowerCase() !== title.trim().toLowerCase()
+      })
+
+      return {
+        chapterId: chapter.id,
+        title,
+        blockId,
+        items,
+      }
+    })
+    .filter((group) => group.title.trim() && group.blockId)
+}
+
+
+function renderWithSearchMatches(text: string, searchQuery: string, isActive: boolean) {
+  const trimmed = searchQuery.trim()
+  if (!trimmed) return text
+
+  const parts = text.split(new RegExp(`(${escapeForRegExp(trimmed)})`, 'gi'))
+  return parts.map((part, index) => {
+    if (part.toLowerCase() !== trimmed.toLowerCase()) {
+      return <span key={index}>{part}</span>
+    }
+    return (
+      <mark
+        key={index}
+        className={
+          isActive
+            ? 'bg-[rgba(255,200,60,0.72)] text-[#000] rounded-[2px] px-[0.1em] py-[0.05em]'
+            : 'bg-[rgba(255,200,60,0.28)] text-text-primary rounded-[2px] px-[0.1em] py-[0.05em]'
+        }
+      >
+        {part}
+      </mark>
+    )
+  })
+}
+
+const ReaderBlockView = memo(function ReaderBlockView(props: {
   block: ReaderBlock
   chapterId: string
   documentId: string
   highlights: Highlight[]
+  searchQuery?: string
+  activeSearchBlockId?: string
+  onPreviewImage?: (image: ImagePreviewState) => void
 }) {
-  const { block, chapterId, documentId, highlights } = props
+  const { block, chapterId, documentId, highlights, searchQuery = '', activeSearchBlockId, onPreviewImage } = props
+
+  function renderText(text: string) {
+    const withHighlights = renderWithHighlights(text, highlights, documentId, block.id)
+    if (!searchQuery.trim()) return withHighlights
+    if (Array.isArray(withHighlights)) {
+      return withHighlights.map((node) => {
+        if (typeof node === 'string') {
+          return renderWithSearchMatches(node, searchQuery, block.id === activeSearchBlockId)
+        }
+        return node
+      })
+    }
+    return renderWithSearchMatches(text, searchQuery, block.id === activeSearchBlockId)
+  }
+
+  const blockBase = 'mb-[1.15em] break-inside-avoid scroll-mt-6'
 
   switch (block.type) {
     case 'heading':
+      if (isUtilityHeading(block.text ?? '')) {
+        return null
+      }
+
       return (
-        <h3 className="reader-block type-heading" data-chapter-id={chapterId} data-block-id={block.id}>
+        <h3
+          className={`${blockBase} mt-[2.4em] mb-[0.9em] font-display font-semibold leading-[1.18]`}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
           {block.text}
         </h3>
       )
     case 'quote':
       return (
-        <blockquote className="reader-block type-quote" data-chapter-id={chapterId} data-block-id={block.id}>
-          {renderWithHighlights(block.text ?? '', highlights, documentId, block.id)}
+        <blockquote
+          className={`${blockBase} pl-[18px] border-l border-border-strong text-text-secondary`}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
+          {renderText(block.text ?? '')}
         </blockquote>
       )
     case 'list':
       return (
-        <ul className="reader-block type-list" data-chapter-id={chapterId} data-block-id={block.id}>
+        <ul
+          className={`${blockBase} pl-[1.2em]`}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
           {(block.items ?? []).map((item, index) => (
             <li key={`${block.id}-${index}`}>{item}</li>
           ))}
@@ -213,47 +428,130 @@ function ReaderBlockView(props: {
       )
     case 'code':
       return (
-        <pre className="reader-block type-code" data-chapter-id={chapterId} data-block-id={block.id}>
+        <pre
+          className={`${blockBase} p-[18px] bg-[#050505] border border-border-subtle font-mono text-[0.92em] whitespace-pre-wrap`}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
           <code>{block.text}</code>
         </pre>
       )
     case 'image':
       return (
-        <figure className="reader-block type-image" data-chapter-id={chapterId} data-block-id={block.id}>
-          <img loading="lazy" src={block.src} alt={block.alt ?? block.caption ?? 'Imported image'} />
-          {block.caption ? <figcaption>{block.caption}</figcaption> : null}
+        <figure
+          className={blockBase}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
+          <button
+            type="button"
+            className="block w-full p-0 border-0 bg-transparent cursor-zoom-in"
+            onClick={() =>
+              block.src
+                ? onPreviewImage?.({
+                    src: block.src,
+                    alt: block.alt ?? block.caption ?? 'Imported image',
+                    caption: block.caption,
+                  })
+                : undefined
+            }
+            disabled={!block.src}
+          >
+            <img
+              loading="eager"
+              src={block.src}
+              alt={block.alt ?? block.caption ?? 'Imported image'}
+              className="w-full max-h-[min(60vh,520px)] object-contain"
+            />
+          </button>
+          {block.caption ? (
+            <figcaption className="mt-2 text-text-muted text-[0.9em]">{block.caption}</figcaption>
+          ) : null}
         </figure>
       )
     default:
       return (
-        <p className="reader-block type-paragraph" data-chapter-id={chapterId} data-block-id={block.id}>
-          {renderWithHighlights(block.text ?? '', highlights, documentId, block.id)}
+        <p
+          className={blockBase}
+          data-chapter-id={chapterId}
+          data-block-id={block.id}
+        >
+          {renderText(block.text ?? '')}
         </p>
       )
   }
-}
+})
+
+const PageEntryView = memo(function PageEntryView(props: {
+  entry: PageEntry
+  documentId: string
+  highlights: Highlight[]
+  searchQuery?: string
+  activeSearchBlockId?: string
+  onPreviewImage?: (image: ImagePreviewState) => void
+}) {
+  const { entry, documentId, highlights, searchQuery, activeSearchBlockId, onPreviewImage } = props
+
+  if (entry.kind === 'chapter') {
+    return (
+      <div className="block" data-page-entry-id={entry.id}>
+        <h2 className="m-0 mb-[18px] text-[0.76rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
+          {entry.title}
+        </h2>
+      </div>
+    )
+  }
+
+  return (
+    <div className="block" data-page-entry-id={entry.id}>
+      <ReaderBlockView
+        block={entry.block}
+        chapterId={entry.chapterId}
+        documentId={documentId}
+        highlights={highlights}
+        searchQuery={searchQuery}
+        activeSearchBlockId={activeSearchBlockId}
+        onPreviewImage={onPreviewImage}
+      />
+    </div>
+  )
+})
 
 function App() {
   const [persistedState, setPersistedState] = useState<PersistedState | null>(null)
   const [mode, setMode] = useState<AppMode>('library')
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null)
   const [activePanel, setActivePanel] = useState<ReaderPanel>(null)
-  const [controlsVisible, setControlsVisible] = useState(true)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [urlInput, setUrlInput] = useState('')
-  const [importMessage, setImportMessage] = useState('Import a PDF, EPUB, or URL to build the local library.')
   const [isImporting, setIsImporting] = useState(false)
+  const [deletingDocumentIds, setDeletingDocumentIds] = useState<string[]>([])
   const [isDragging, setIsDragging] = useState(false)
+  const [librarySearchQuery, setLibrarySearchQuery] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [isReaderSearchOpen, setIsReaderSearchOpen] = useState(false)
+  const [searchResultIndex, setSearchResultIndex] = useState(0)
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null)
+  const [previewImage, setPreviewImage] = useState<ImagePreviewState | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null)
+  const [expandedTocChapters, setExpandedTocChapters] = useState<string[]>([])
   const [pageIndex, setPageIndex] = useState(0)
+  const [pageCount, setPageCount] = useState(1)
+  const [pages, setPages] = useState<PageEntry[][]>([])
+  const [readingModeOverride, setReadingModeOverride] = useState<ReadingMode | null>(null)
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const readerRef = useRef<HTMLDivElement | null>(null)
-  const hideControlsTimerRef = useRef<number | null>(null)
+  const pageViewportRef = useRef<HTMLDivElement | null>(null)
+  const pageMeasureRef = useRef<HTMLDivElement | null>(null)
   const progressSaveTimerRef = useRef<number | null>(null)
   const preferenceSaveTimerRef = useRef<number | null>(null)
+  const pendingScrollRestoreRef = useRef(false)
   const latestProgressRef = useRef<ReadingProgress | null>(null)
   const latestPreferencesRef = useRef(defaultPreferences)
+  const librarySearchRef = useRef<HTMLInputElement | null>(null)
+  const readerSearchRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -289,11 +587,12 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (hideControlsTimerRef.current) {
-        window.clearTimeout(hideControlsTimerRef.current)
-      }
       if (progressSaveTimerRef.current) {
         window.clearTimeout(progressSaveTimerRef.current)
+        const latestProgress = latestProgressRef.current
+        if (latestProgress) {
+          void window.paperMagic.saveProgress(latestProgress)
+        }
       }
       if (preferenceSaveTimerRef.current) {
         window.clearTimeout(preferenceSaveTimerRef.current)
@@ -307,19 +606,42 @@ function App() {
     }
   }, [activeDocumentId, persistedState])
 
-  const queueProgressSave = (progress: ReadingProgress) => {
-    latestProgressRef.current = progress
+  useEffect(() => {
+    setExpandedTocChapters([])
+  }, [activeDocumentId])
 
-    setPersistedState((currentState) => {
-      if (!currentState) {
-        return currentState
-      }
+  const commitProgress = useCallback((progress: ReadingProgress) => {
+    startTransition(() => {
+      setPersistedState((currentState) => {
+        if (!currentState) {
+          return currentState
+        }
 
-      return {
-        ...currentState,
-        progress: upsertProgress(currentState.progress, progress),
-      }
+        return {
+          ...currentState,
+          progress: upsertProgress(currentState.progress, progress),
+        }
+      })
     })
+  }, [])
+
+  const flushQueuedProgressSave = () => {
+    if (progressSaveTimerRef.current) {
+      window.clearTimeout(progressSaveTimerRef.current)
+      progressSaveTimerRef.current = null
+    }
+
+    const latestProgress = latestProgressRef.current
+    if (!latestProgress) {
+      return
+    }
+
+    commitProgress(latestProgress)
+    void window.paperMagic.saveProgress(latestProgress)
+  }
+
+  const queueProgressSave = useCallback((progress: ReadingProgress) => {
+    latestProgressRef.current = progress
 
     if (progressSaveTimerRef.current) {
       window.clearTimeout(progressSaveTimerRef.current)
@@ -327,11 +649,13 @@ function App() {
 
     progressSaveTimerRef.current = window.setTimeout(() => {
       const latestProgress = latestProgressRef.current
+      progressSaveTimerRef.current = null
       if (latestProgress) {
+        commitProgress(latestProgress)
         void window.paperMagic.saveProgress(latestProgress)
       }
     }, 180)
-  }
+  }, [commitProgress])
 
   const queuePreferenceSave = (preferences: PersistedState['preferences']) => {
     latestPreferencesRef.current = preferences
@@ -358,7 +682,7 @@ function App() {
 
   const mergeImportedDocuments = (documents: DocumentRecord[], message: string) => {
     if (documents.length === 0) {
-      setImportMessage(message)
+      toast(message)
       return
     }
 
@@ -375,31 +699,107 @@ function App() {
     })
 
     setActiveDocumentId(documents[0]?.id ?? activeDocumentId)
-    setImportMessage(message)
+    toast.success(message)
   }
 
   const activeDocument =
     persistedState?.documents.find((document) => document.id === activeDocumentId) ?? null
-  const activeProgress =
-    activeDocument && persistedState
-      ? persistedState.progress.find((progress) => progress.documentId === activeDocument.id) ?? null
-      : null
-  const activeReadingMode: ReadingMode =
-    activeProgress?.readingMode ?? activeDocument?.preferredMode ?? 'scroll'
-  const flatBlocks = useMemo(() => (activeDocument ? flattenDocument(activeDocument) : []), [activeDocument])
-  const pages = useMemo(() => buildPages(flatBlocks), [flatBlocks])
-  const documentHighlights =
-    activeDocument && persistedState
-      ? persistedState.highlights.filter((highlight) => highlight.documentId === activeDocument.id)
-      : []
-  const documentBookmarks =
-    activeDocument && persistedState
-      ? persistedState.bookmarks.filter((bookmark) => bookmark.documentId === activeDocument.id)
-      : []
+  const persistedActiveProgress = useMemo(
+    () =>
+      activeDocument && persistedState
+        ? persistedState.progress.find((progress) => progress.documentId === activeDocument.id) ?? null
+        : null,
+    [activeDocument, persistedState],
+  )
+  const activeProgress = persistedActiveProgress
+  const deferredLibrarySearchQuery = useDeferredValue(librarySearchQuery)
+  const libraryDocuments = useMemo(() => {
+    if (!persistedState) {
+      return []
+    }
+
+    return [...persistedState.documents].sort((left, right) => {
+      const leftProgress = persistedState.progress.find((progress) => progress.documentId === left.id)
+      const rightProgress = persistedState.progress.find((progress) => progress.documentId === right.id)
+      const leftTimestamp = new Date(leftProgress?.lastOpenedAt ?? left.metadata.importedAt).getTime()
+      const rightTimestamp = new Date(rightProgress?.lastOpenedAt ?? right.metadata.importedAt).getTime()
+
+      return rightTimestamp - leftTimestamp
+    })
+  }, [persistedState])
+  const activeReadingMode: ReadingMode = readingModeOverride ?? activeProgress?.readingMode ?? activeDocument?.preferredMode ?? 'page'
+  const pageEntries = useMemo(() => buildPageEntries(activeDocument), [activeDocument])
+  const pageEntryById = useMemo(() => new Map(pageEntries.map((entry) => [entry.id, entry])), [pageEntries])
+  const documentHighlights = useMemo(
+    () =>
+      activeDocument && persistedState
+        ? persistedState.highlights.filter((highlight) => highlight.documentId === activeDocument.id)
+        : [],
+    [activeDocument, persistedState],
+  )
+  const documentBookmarks = useMemo(
+    () =>
+      activeDocument && persistedState
+        ? persistedState.bookmarks.filter((bookmark) => bookmark.documentId === activeDocument.id)
+        : [],
+    [activeDocument, persistedState],
+  )
   const searchResults = useMemo(
     () => (activeDocument ? buildSearchResults(activeDocument, searchQuery) : []),
     [activeDocument, searchQuery],
   )
+  const activeSearchBlockId = isReaderSearchOpen && searchResults.length > 0
+    ? searchResults[searchResultIndex % searchResults.length]?.blockId
+    : undefined
+  const filteredLibraryDocuments = useMemo(() => {
+    const normalizedQuery = deferredLibrarySearchQuery.trim().toLowerCase()
+
+    if (!normalizedQuery) {
+      return libraryDocuments
+    }
+
+    return libraryDocuments.filter((document) => {
+      const haystack = [
+        document.title,
+        document.author,
+        documentAuthorLabel(document),
+        document.metadata.originLabel,
+        sourceLabel(document.sourceType),
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      return haystack.includes(normalizedQuery)
+    })
+  }, [deferredLibrarySearchQuery, libraryDocuments])
+  const blockPageIndex = useMemo(() => {
+    const nextMap = new Map<string, number>()
+
+    pages.forEach((page, nextPageIndex) => {
+      page.forEach((entry) => {
+        if (entry.kind === 'block') {
+          nextMap.set(entry.block.id, nextPageIndex)
+        }
+      })
+    })
+
+    return nextMap
+  }, [pages])
+  const pageMeasureContent = useMemo(
+    () =>
+      activeDocument
+        ? pageEntries.map((entry) => (
+            <PageEntryView
+              key={`measure-${entry.id}`}
+              entry={entry}
+              documentId={activeDocument.id}
+              highlights={documentHighlights}
+            />
+          ))
+        : null,
+    [activeDocument, documentHighlights, pageEntries],
+  )
+
 
   useEffect(() => {
     if (!activeDocument) {
@@ -412,122 +812,142 @@ function App() {
     }
 
     setPageIndex(0)
+    setPageCount(1)
+    setPages([])
   }, [activeDocument, activeProgress?.pageIndex, activeReadingMode])
 
   useEffect(() => {
-    if (mode !== 'reader') {
+    if (!activeDocument || activeReadingMode !== 'page' || pages.length === 0) {
       return
     }
 
-    const showControls = () => {
-      setControlsVisible(true)
-      if (hideControlsTimerRef.current) {
-        window.clearTimeout(hideControlsTimerRef.current)
-      }
-      hideControlsTimerRef.current = window.setTimeout(() => {
-        setControlsVisible(false)
-      }, 2200)
-    }
-
-    const handleKeyboard = (event: KeyboardEvent) => {
-      showControls()
-
-      if (!activeDocument) {
-        return
-      }
-
-      const metaKeyPressed = event.metaKey || event.ctrlKey
-
-      if (metaKeyPressed && event.key.toLowerCase() === 'f') {
-        event.preventDefault()
-        setActivePanel('search')
-        return
-      }
-
-      if (metaKeyPressed && event.key.toLowerCase() === 't') {
-        event.preventDefault()
-        setActivePanel((currentPanel) => (currentPanel === 'toc' ? null : 'toc'))
-        return
-      }
-
-      if (event.key === 'Escape') {
-        setActivePanel(null)
-        setSelectionDraft(null)
-        return
-      }
-
-      if (event.key.toLowerCase() === 'j' && readerRef.current) {
-        readerRef.current.scrollBy({ top: 160, behavior: 'smooth' })
-        return
-      }
-
-      if (event.key.toLowerCase() === 'k' && readerRef.current) {
-        readerRef.current.scrollBy({ top: -160, behavior: 'smooth' })
-        return
-      }
-
-      if (event.key === ' ' && activeReadingMode === 'page') {
-        event.preventDefault()
-        setPageIndex((current) => clamp(current + 1, 0, Math.max(0, pages.length - 1)))
-      }
-    }
-
-    showControls()
-    window.addEventListener('mousemove', showControls)
-    window.addEventListener('touchstart', showControls)
-    window.addEventListener('keydown', handleKeyboard)
-
-    return () => {
-      window.removeEventListener('mousemove', showControls)
-      window.removeEventListener('touchstart', showControls)
-      window.removeEventListener('keydown', handleKeyboard)
-      if (hideControlsTimerRef.current) {
-        window.clearTimeout(hideControlsTimerRef.current)
-      }
-    }
-  }, [activeDocument, activeReadingMode, mode, pages.length])
-
-  useEffect(() => {
-    if (!activeDocument || activeReadingMode !== 'page') {
-      return
-    }
-
-    const block = pages[pageIndex]?.[0]
-
-    if (!block) {
+    const currentPage = pages[pageIndex] ?? pages[0]
+    const firstBlock = currentPage?.find((entry) => entry.kind === 'block')
+    if (!firstBlock || firstBlock.kind !== 'block') {
       return
     }
 
     queueProgressSave({
       documentId: activeDocument.id,
-      progress: pages.length <= 1 ? 1 : pageIndex / (pages.length - 1),
-      chapterId: block.chapterId,
-      blockId: block.block.id,
+      progress: pageCount <= 1 ? 1 : pageIndex / (pageCount - 1),
+      chapterId: firstBlock.chapterId,
+      blockId: firstBlock.block.id,
       pageIndex,
       readingMode: 'page',
       lastOpenedAt: new Date().toISOString(),
     })
-  }, [activeDocument, activeReadingMode, pageIndex, pages])
+  }, [activeDocument, activeReadingMode, pageCount, pageIndex, pages, queueProgressSave])
 
-  useEffect(() => {
-    if (!activeDocument || mode !== 'reader' || activeReadingMode !== 'scroll') {
+  useLayoutEffect(() => {
+    if (mode !== 'reader' || activeReadingMode !== 'page') {
       return
     }
 
-    const targetBlockId = activeProgress?.blockId
-    if (!targetBlockId) {
+    const viewportElement = pageViewportRef.current
+    const measureElement = pageMeasureRef.current
+    if (!viewportElement || !measureElement) {
       return
     }
 
-    const timer = window.setTimeout(() => {
-      const target = readerRef.current?.querySelector<HTMLElement>(`[data-block-id="${targetBlockId}"]`)
-      target?.scrollIntoView({ block: 'start' })
-    }, 60)
+    let animationFrame = 0
+
+    const runMeasurement = () => {
+      const pageHeight = viewportElement.clientHeight
+      const entryElements = Array.from(measureElement.querySelectorAll<HTMLElement>('[data-page-entry-id]'))
+
+      if (pageHeight <= 0 || entryElements.length === 0) {
+        setPages(pageEntries.length > 0 ? [pageEntries] : [])
+        setPageCount(1)
+        return
+      }
+
+      const nextPages: PageEntry[][] = []
+      let currentPage: PageEntry[] = []
+      let currentPageLimit = entryElements[0].offsetTop + pageHeight
+
+      entryElements.forEach((element) => {
+        const entryId = element.dataset.pageEntryId
+        const entry = entryId ? pageEntryById.get(entryId) : undefined
+        if (!entry) {
+          return
+        }
+
+        const entryBottom = element.offsetTop + element.offsetHeight
+        if (currentPage.length > 0 && entryBottom > currentPageLimit) {
+          nextPages.push(currentPage)
+          currentPage = []
+          currentPageLimit = element.offsetTop + pageHeight
+        }
+
+        currentPage.push(entry)
+
+        if (currentPage.length === 1 && entryBottom > currentPageLimit) {
+          currentPageLimit = entryBottom
+        }
+      })
+
+      if (currentPage.length > 0) {
+        nextPages.push(currentPage)
+      }
+
+      const resolvedPages = nextPages.length > 0 ? nextPages : [pageEntries]
+      setPages(resolvedPages)
+      setPageCount(resolvedPages.length)
+      setPageIndex((currentPageIndex) => clamp(currentPageIndex, 0, resolvedPages.length - 1))
+    }
+
+    const measurePages = () => {
+      if (animationFrame) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+
+      animationFrame = window.requestAnimationFrame(runMeasurement)
+    }
+
+    runMeasurement()
+
+    const resizeObserver = new ResizeObserver(measurePages)
+    resizeObserver.observe(viewportElement)
+    resizeObserver.observe(measureElement)
+    window.addEventListener('resize', measurePages)
 
     return () => {
-      window.clearTimeout(timer)
+      if (animationFrame) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', measurePages)
     }
-  }, [activeDocument?.id, activeProgress?.blockId, activeReadingMode, mode])
+  }, [
+    activeDocument?.id,
+    activeReadingMode,
+    mode,
+    pageEntryById,
+    pageEntries,
+    persistedState?.preferences.fontSize,
+    persistedState?.preferences.readingWidth,
+  ])
+
+  useLayoutEffect(() => {
+    if (!pendingScrollRestoreRef.current || !activeDocumentId || mode !== 'reader' || activeReadingMode !== 'scroll') {
+      return
+    }
+
+    const readerElement = readerRef.current
+    const targetBlockId = activeProgress?.blockId
+    if (!readerElement || !targetBlockId) {
+      return
+    }
+
+    const target = readerElement.querySelector<HTMLElement>(`[data-block-id="${targetBlockId}"]`)
+    if (!target) {
+      return
+    }
+
+    pendingScrollRestoreRef.current = false
+    target.scrollIntoView({ block: 'start' })
+  }, [activeDocumentId, activeProgress?.blockId, activeReadingMode, mode])
 
   const openDocument = (documentId: string) => {
     if (!persistedState) {
@@ -541,13 +961,17 @@ function App() {
 
     setActiveDocumentId(documentId)
     setMode('reader')
-    setActivePanel(null)
+    setActivePanel('toc')
+    setIsSidebarOpen(true)
     setSearchQuery('')
     setSelectionDraft(null)
+    setPreviewImage(null)
+    setReadingModeOverride(null)
 
     const existingProgress = persistedState.progress.find((progress) => progress.documentId === documentId)
     const fallbackBlock = document.chapters[0]?.content[0]
     const fallbackChapter = document.chapters[0]
+    pendingScrollRestoreRef.current = (existingProgress?.readingMode ?? document.preferredMode ?? 'page') === 'scroll'
 
     if (fallbackBlock && fallbackChapter) {
       queueProgressSave({
@@ -556,16 +980,19 @@ function App() {
         chapterId: existingProgress?.chapterId ?? fallbackChapter.id,
         blockId: existingProgress?.blockId ?? fallbackBlock.id,
         pageIndex: existingProgress?.pageIndex ?? 0,
-        readingMode: existingProgress?.readingMode ?? document.preferredMode,
+        readingMode: existingProgress?.readingMode ?? 'page',
         lastOpenedAt: new Date().toISOString(),
       })
     }
   }
 
   const exitReader = () => {
+    flushQueuedProgressSave()
     setMode('library')
     setActivePanel(null)
+    setIsSidebarOpen(true)
     setSelectionDraft(null)
+    setPreviewImage(null)
   }
 
   const handleImportDialog = async () => {
@@ -580,7 +1007,7 @@ function App() {
           : 'No new files were selected for import.',
       )
     } catch (error) {
-      setImportMessage(error instanceof Error ? error.message : 'The selected files could not be imported.')
+      toast.error(error instanceof Error ? error.message : 'The selected files could not be imported.')
     } finally {
       setIsImporting(false)
     }
@@ -596,7 +1023,7 @@ function App() {
       .filter((pathValue): pathValue is string => Boolean(pathValue))
 
     if (paths.length === 0) {
-      setImportMessage('Dropped files could not be resolved into local paths.')
+      toast.error('Dropped files could not be resolved into local paths.')
       return
     }
 
@@ -611,7 +1038,7 @@ function App() {
           : 'Those files were already in the local library.',
       )
     } catch (error) {
-      setImportMessage(error instanceof Error ? error.message : 'The dropped files could not be imported.')
+      toast.error(error instanceof Error ? error.message : 'The dropped files could not be imported.')
     } finally {
       setIsImporting(false)
     }
@@ -629,7 +1056,7 @@ function App() {
       mergeImportedDocuments([document], `Saved ${document.title} to the local library.`)
       setUrlInput('')
     } catch (error) {
-      setImportMessage(error instanceof Error ? error.message : 'The URL could not be imported in this environment.')
+      toast.error(error instanceof Error ? error.message : 'The URL could not be imported in this environment.')
     } finally {
       setIsImporting(false)
     }
@@ -666,8 +1093,8 @@ function App() {
     }
 
     if (activeReadingMode === 'page') {
-      const nextPageIndex = pages.findIndex((page) => page.some((entry) => entry.block.id === blockId))
-      if (nextPageIndex >= 0) {
+      const nextPageIndex = blockPageIndex.get(blockId)
+      if (nextPageIndex !== undefined) {
         setPageIndex(nextPageIndex)
       }
       return
@@ -694,18 +1121,20 @@ function App() {
     })
   }
 
-  const toggleReadingMode = () => {
+  const setReadingMode = (nextMode: ReadingMode) => {
     if (!activeDocument) {
       return
     }
 
-    const nextMode: ReadingMode = activeReadingMode === 'scroll' ? 'page' : 'scroll'
     const fallbackBlock = activeDocument.chapters[0]?.content[0]
     const fallbackChapter = activeDocument.chapters[0]
 
     if (!fallbackBlock || !fallbackChapter) {
       return
     }
+
+    pendingScrollRestoreRef.current = nextMode === 'scroll'
+    setReadingModeOverride(nextMode)
 
     queueProgressSave({
       documentId: activeDocument.id,
@@ -716,6 +1145,86 @@ function App() {
       readingMode: nextMode,
       lastOpenedAt: new Date().toISOString(),
     })
+  }
+
+  const toggleReadingMode = () => {
+    setReadingMode(activeReadingMode === 'scroll' ? 'page' : 'scroll')
+  }
+
+  const changePage = (delta: number) => {
+    setPageIndex((currentPageIndex) => clamp(currentPageIndex + delta, 0, Math.max(0, pageCount - 1)))
+  }
+
+  const jumpToBoundaryPage = (nextPageIndex: number) => {
+    setPageIndex(clamp(nextPageIndex, 0, Math.max(0, pageCount - 1)))
+  }
+
+  const handleRemoveDocument = async (document: DocumentRecord) => {
+    if (!persistedState || deletingDocumentIds.includes(document.id)) {
+      return
+    }
+
+    setConfirmDialog({
+      title: 'Remove from library',
+      message: `Remove "${document.title}"? This deletes the saved copy, cover assets, and reading state.`,
+      confirmLabel: 'Remove',
+      onConfirm: () => void handleRemoveDocumentConfirmed(document),
+    })
+  }
+
+  const handleRemoveDocumentConfirmed = async (document: DocumentRecord) => {
+    if (!persistedState) {
+      return
+    }
+
+    const previousState = persistedState
+    const previousMode = mode
+    const previousActiveDocumentId = activeDocumentId
+    const previousActivePanel = activePanel
+    const previousIsSidebarOpen = isSidebarOpen
+    const previousSearchQuery = searchQuery
+    const previousSelectionDraft = selectionDraft
+    const previousPreviewImage = previewImage
+    const isRemovingActiveDocument = activeDocumentId === document.id
+    const nextState = removeDocumentFromState(previousState, document.id)
+
+    if (isRemovingActiveDocument && progressSaveTimerRef.current) {
+      window.clearTimeout(progressSaveTimerRef.current)
+      progressSaveTimerRef.current = null
+      latestProgressRef.current = null
+    }
+
+    setDeletingDocumentIds((current) => [...current, document.id])
+    setPersistedState(nextState)
+
+    if (isRemovingActiveDocument) {
+      setMode('library')
+      setActivePanel(null)
+      setIsSidebarOpen(true)
+      setSelectionDraft(null)
+      setPreviewImage(null)
+      setSearchQuery('')
+      setActiveDocumentId(nextState.documents[0]?.id ?? null)
+    } else if (activeDocumentId && !nextState.documents.some((entry) => entry.id === activeDocumentId)) {
+      setActiveDocumentId(nextState.documents[0]?.id ?? null)
+    }
+
+    try {
+      await window.paperMagic.removeDocument(document.id)
+      toast.success(`Removed "${document.title}" from your library.`)
+    } catch (error) {
+      setPersistedState(previousState)
+      setMode(previousMode)
+      setActiveDocumentId(previousActiveDocumentId)
+      setActivePanel(previousActivePanel)
+      setIsSidebarOpen(previousIsSidebarOpen)
+      setSearchQuery(previousSearchQuery)
+      setSelectionDraft(previousSelectionDraft)
+      setPreviewImage(previousPreviewImage)
+      toast.error(error instanceof Error ? error.message : `Could not remove ${document.title}.`)
+    } finally {
+      setDeletingDocumentIds((current) => current.filter((documentId) => documentId !== document.id))
+    }
   }
 
   const addBookmark = async () => {
@@ -765,6 +1274,55 @@ function App() {
     window.getSelection()?.removeAllRanges()
   }
 
+  const toggleHighlightAtSelection = async () => {
+    if (!activeDocument || !persistedState) {
+      return
+    }
+
+    if (selectionDraft) {
+      await addHighlight()
+      return
+    }
+
+    const selection = window.getSelection()
+    const node = selection?.focusNode
+    const blockElement = (node?.nodeType === Node.TEXT_NODE ? node.parentElement : (node as Element | null))?.closest<HTMLElement>('[data-block-id]')
+    if (!blockElement) {
+      return
+    }
+
+    const blockId = blockElement.dataset.blockId
+    const existingHighlight = persistedState.highlights.find(
+      (h) => h.documentId === activeDocument.id && h.blockId === blockId,
+    )
+
+    if (existingHighlight) {
+      await window.paperMagic.removeHighlight(existingHighlight.id)
+      setPersistedState({
+        ...persistedState,
+        highlights: persistedState.highlights.filter((h) => h.id !== existingHighlight.id),
+      })
+    }
+  }
+
+  const removeHighlightById = async (highlightId: string) => {
+    if (!persistedState) return
+    await window.paperMagic.removeHighlight(highlightId)
+    setPersistedState({
+      ...persistedState,
+      highlights: persistedState.highlights.filter((h) => h.id !== highlightId),
+    })
+  }
+
+  const removeBookmarkById = async (bookmarkId: string) => {
+    if (!persistedState) return
+    await window.paperMagic.removeBookmark(bookmarkId)
+    setPersistedState({
+      ...persistedState,
+      bookmarks: persistedState.bookmarks.filter((b) => b.id !== bookmarkId),
+    })
+  }
+
   const handleSelectionChange = () => {
     const selection = window.getSelection()
 
@@ -796,52 +1354,362 @@ function App() {
     })
   }
 
-  const sections = useMemo(() => {
-    if (!persistedState) {
-      return []
-    }
+  const readerHotkeysEnabled = mode === 'reader' && Boolean(activeDocument)
+  const pageModeHotkeysEnabled = readerHotkeysEnabled && activeReadingMode === 'page'
 
-    return [
-      {
-        title: 'Recently Read',
-        documents: [...persistedState.documents]
-          .sort((left, right) => {
-            const leftProgress = persistedState.progress.find((progress) => progress.documentId === left.id)
-            const rightProgress = persistedState.progress.find((progress) => progress.documentId === right.id)
-            return (
-              new Date(rightProgress?.lastOpenedAt ?? 0).getTime() -
-              new Date(leftProgress?.lastOpenedAt ?? 0).getTime()
-            )
-          })
-          .slice(0, 4),
-      },
-      {
-        title: 'Books',
-        documents: persistedState.documents.filter((document) => document.sourceType === 'epub'),
-      },
-      {
-        title: 'Articles',
-        documents: persistedState.documents.filter((document) => document.sourceType === 'pdf'),
-      },
-      {
-        title: 'Saved Web Pages',
-        documents: persistedState.documents.filter((document) => document.sourceType === 'web'),
-      },
-    ]
-  }, [persistedState])
+  useHotkey(
+    'Mod+F',
+    () => {
+      setIsReaderSearchOpen(true)
+      setSearchResultIndex(0)
+      setTimeout(() => readerSearchRef.current?.focus(), 0)
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'Mod+F',
+    () => {
+      librarySearchRef.current?.focus()
+    },
+    { enabled: mode === 'library' },
+  )
+
+  useHotkey(
+    'Mod+T',
+    () => {
+      setActivePanel('toc')
+      setIsSidebarOpen(true)
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'Mod+B',
+    () => {
+      setIsSidebarOpen((open) => !open)
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'F',
+    () => {
+      void toggleFullscreen()
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'Escape',
+    () => {
+      if (previewImage) {
+        setPreviewImage(null)
+        return
+      }
+
+      if (isReaderSearchOpen) {
+        setIsReaderSearchOpen(false)
+        setSearchQuery('')
+        return
+      }
+
+      if (selectionDraft) {
+        setSelectionDraft(null)
+        window.getSelection()?.removeAllRanges()
+        return
+      }
+
+      if (activePanel) {
+        if (activePanel !== 'toc') {
+          setActivePanel('toc')
+          setIsSidebarOpen(true)
+          return
+        }
+      }
+
+      if (isSidebarOpen) {
+        setIsSidebarOpen(false)
+        return
+      }
+
+      exitReader()
+    },
+    { enabled: readerHotkeysEnabled, ignoreInputs: false },
+  )
+
+  useHotkey(
+    'Mod+Shift+M',
+    () => {
+      toggleReadingMode()
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'Mod+H',
+    () => {
+      void toggleHighlightAtSelection()
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'Mod+O',
+    () => {
+      void handleImportDialog()
+    },
+    { enabled: true },
+  )
+
+  useHotkey(
+    'J',
+    () => {
+      if (activeReadingMode === 'page') {
+        changePage(1)
+        return
+      }
+
+      readerRef.current?.scrollBy({ top: 160, behavior: 'smooth' })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'K',
+    () => {
+      if (activeReadingMode === 'page') {
+        changePage(-1)
+        return
+      }
+
+      readerRef.current?.scrollBy({ top: -160, behavior: 'smooth' })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'H',
+    () => {
+      changePage(-1)
+    },
+    { enabled: pageModeHotkeysEnabled },
+  )
+
+  useHotkey(
+    'L',
+    () => {
+      changePage(1)
+    },
+    { enabled: pageModeHotkeysEnabled },
+  )
+
+  useHotkey(
+    'N',
+    () => {
+      if (isReaderSearchOpen && searchResults.length > 0) {
+        setSearchResultIndex((i) => (i + 1) % searchResults.length)
+        return
+      }
+      setActivePanel((currentPanel) => (currentPanel === 'notes' ? null : 'notes'))
+      setIsSidebarOpen(true)
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'Shift+N',
+    () => {
+      if (isReaderSearchOpen && searchResults.length > 0) {
+        setSearchResultIndex((i) => (i - 1 + searchResults.length) % searchResults.length)
+      }
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'B',
+    () => {
+      void addBookmark()
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'M',
+    () => {
+      toggleReadingMode()
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    { key: '=' },
+    () => {
+      queuePreferenceSave({
+        ...latestPreferencesRef.current,
+        fontSize: clamp(latestPreferencesRef.current.fontSize + 1, 16, 24),
+      })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    { key: '=', shift: true },
+    () => {
+      queuePreferenceSave({
+        ...latestPreferencesRef.current,
+        fontSize: clamp(latestPreferencesRef.current.fontSize + 1, 16, 24),
+      })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    '-',
+    () => {
+      queuePreferenceSave({
+        ...latestPreferencesRef.current,
+        fontSize: clamp(latestPreferencesRef.current.fontSize - 1, 16, 24),
+      })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    '[',
+    () => {
+      queuePreferenceSave({
+        ...latestPreferencesRef.current,
+        readingWidth: clamp(latestPreferencesRef.current.readingWidth - 20, 700, 1040),
+      })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    ']',
+    () => {
+      queuePreferenceSave({
+        ...latestPreferencesRef.current,
+        readingWidth: clamp(latestPreferencesRef.current.readingWidth + 20, 700, 1040),
+      })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'Space',
+    () => {
+      if (activeReadingMode === 'page') {
+        changePage(1)
+        return
+      }
+
+      setActivePanel(null)
+      readerRef.current?.scrollBy({ top: window.innerHeight * 0.85, behavior: 'smooth' })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkey(
+    'ArrowRight',
+    () => {
+      changePage(1)
+    },
+    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
+  )
+
+  useHotkey(
+    'ArrowLeft',
+    () => {
+      changePage(-1)
+    },
+    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
+  )
+
+  useHotkey(
+    'PageDown',
+    () => {
+      changePage(1)
+    },
+    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
+  )
+
+  useHotkey(
+    'PageUp',
+    () => {
+      changePage(-1)
+    },
+    { enabled: pageModeHotkeysEnabled, ignoreInputs: false },
+  )
+
+  useHotkey(
+    'Shift+G',
+    () => {
+      if (activeReadingMode === 'page') {
+        jumpToBoundaryPage(Math.max(0, pageCount - 1))
+        return
+      }
+
+      const readerElement = readerRef.current
+      if (!readerElement) {
+        return
+      }
+
+      readerElement.scrollTo({ top: readerElement.scrollHeight, behavior: 'smooth' })
+    },
+    { enabled: readerHotkeysEnabled },
+  )
+
+  useHotkeySequence(
+    ['G', 'G'],
+    () => {
+      if (activeReadingMode === 'page') {
+        jumpToBoundaryPage(0)
+        return
+      }
+
+      readerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+    },
+    { enabled: readerHotkeysEnabled, timeout: 900 },
+  )
+
+  useEffect(() => {
+    if (!isReaderSearchOpen || searchResults.length === 0) {
+      return
+    }
+    const result = searchResults[searchResultIndex]
+    if (result) {
+      jumpToLocation(result.chapterId, result.blockId)
+    }
+  }, [searchResultIndex, isReaderSearchOpen, searchResults])
+
+  useEffect(() => {
+    if (isReaderSearchOpen) {
+      setSearchResultIndex(0)
+    }
+  }, [searchQuery, isReaderSearchOpen])
+
+  const tocGroups = useMemo(() => buildTocGroups(activeDocument), [activeDocument])
+
+  // Shared list-item classes for TOC items, annotation items
+  const listItemBase = 'w-full px-[13px] py-3 text-left bg-white/[0.02] border border-border-subtle text-text-primary transition-[border-color,background,transform] duration-[160ms] cursor-pointer border-0 font-[inherit]'
+  const listItemHover = 'hover:border-border-strong hover:bg-white/[0.04]'
+  const listItemActive = 'border-border-strong! bg-white/[0.06]'
 
   if (isBootstrapping) {
     return (
-      <div className="app-shell">
-        <main className="library-shell">
-          <section className="hero-panel">
-            <div className="hero-copy">
-              <p className="eyebrow">Paper Magic</p>
-              <h1>Loading your offline reading library.</h1>
-              <p className="hero-description">
-                Opening the local database, restoring progress, and preparing the shared reading surface.
-              </p>
-            </div>
+      <div className="min-h-screen text-text-primary bg-bg-page">
+        <main className="w-[min(1120px,calc(100vw-48px))] mx-auto py-7 pb-[88px]">
+          <section className="border border-border-subtle bg-[#000] p-6">
+            <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted">Paper Magic</p>
+            <h1 className="m-0 max-w-[13ch] text-[clamp(2rem,4.5vw,3.4rem)] font-display font-bold leading-[0.98] tracking-[-0.045em]">
+              Loading your offline reading library.
+            </h1>
+            <p className="max-w-[44ch] mt-[14px] text-text-muted">
+              Opening the local database and restoring your reading state.
+            </p>
           </section>
         </main>
       </div>
@@ -850,23 +1718,37 @@ function App() {
 
   if (loadError || !persistedState) {
     return (
-      <div className="app-shell">
-        <main className="library-shell">
-          <section className="hero-panel">
-            <div className="hero-copy">
-              <p className="eyebrow">Paper Magic</p>
-              <h1>Local library unavailable.</h1>
-              <p className="hero-description">{loadError ?? 'The application state could not be initialized.'}</p>
-            </div>
+      <div className="min-h-screen text-text-primary bg-bg-page">
+        <main className="w-[min(1120px,calc(100vw-48px))] mx-auto py-7 pb-[88px]">
+          <section className="border border-border-subtle bg-[#000] p-6">
+            <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted">Paper Magic</p>
+            <h1 className="m-0 max-w-[13ch] text-[clamp(2rem,4.5vw,3.4rem)] font-display font-bold leading-[0.98] tracking-[-0.045em]">
+              Local library unavailable.
+            </h1>
+            <p className="max-w-[44ch] mt-[14px] text-text-muted">
+              {loadError ?? 'The application state could not be initialized.'}
+            </p>
           </section>
         </main>
       </div>
     )
   }
 
+  const visibleReaderPanel = activePanel ?? 'toc'
+  const currentPageEntries = pages[pageIndex] ?? pages[0] ?? []
+  const readerTabs = [
+    { id: 'toc' as const, label: 'Contents', icon: ListIcon, shortcut: 'Mod+T' },
+    { id: 'notes' as const, label: 'Notes', icon: NotebookPenIcon, shortcut: 'N' },
+  ]
+  const readerColumnStyle = {
+    ['--reader-width' as string]: `${clamp(persistedState.preferences.readingWidth, 700, 1040)}px`,
+    fontSize: `${persistedState.preferences.fontSize}px`,
+  } as React.CSSProperties
+
   return (
+    <TooltipProvider>
     <div
-      className={`app-shell ${mode === 'reader' ? 'reader-open' : ''}`}
+      className="min-h-screen text-text-primary bg-bg-page"
       onDragEnter={() => setIsDragging(true)}
       onDragOver={(event) => {
         event.preventDefault()
@@ -892,344 +1774,538 @@ function App() {
         }
       }}
     >
-      {isDragging ? (
-        <div className="drop-overlay">
-          <div className="drop-card">
-            <span>Drop files to import into Paper Magic</span>
-            <p>PDF, EPUB, HTML, Markdown, and text files are normalized into the same reading surface.</p>
-          </div>
-        </div>
-      ) : null}
+      {isDragging ? <DropOverlay /> : null}
 
       {mode === 'library' ? (
-        <main className="library-shell">
-          <section className="hero-panel">
-            <div className="hero-copy">
-              <p className="eyebrow">Paper Magic</p>
-              <h1>One dark reading surface for PDFs, EPUBs, and saved web pages.</h1>
-              <p className="hero-description">
-                The app normalizes every source into the same local-first document model, stores it in SQLite,
-                and keeps the reader consistent even when the input format changes.
-              </p>
-              <div className="hero-metrics">
-                <div>
-                  <strong>{persistedState.documents.length}</strong>
-                  <span>Documents</span>
-                </div>
-                <div>
-                  <strong>{persistedState.bookmarks.length}</strong>
-                  <span>Bookmarks</span>
-                </div>
-                <div>
-                  <strong>{persistedState.highlights.length}</strong>
-                  <span>Highlights</span>
-                </div>
-              </div>
+        <main className="w-[min(1120px,calc(100vw-48px))] mx-auto pt-7 pb-[88px] max-sm:w-[min(calc(100vw-24px),1120px)] max-sm:pt-5">
+          {/* Library header */}
+          <section className="flex justify-between items-end gap-[18px] mb-5 max-sm:items-start">
+            <div>
+              <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted">Paper Magic</p>
+              <h1 className="m-0 text-[clamp(2rem,5vw,3rem)] font-display font-bold leading-[0.94] tracking-[-0.05em]">
+                Library
+              </h1>
             </div>
-            <div className="pipeline-panel">
-              <p className="pipeline-label">Normalization pipeline</p>
-              <div className="pipeline-flow">
-                <span>Source</span>
-                <span>Extraction</span>
-                <span>Unified document</span>
-                <span>Reader</span>
-              </div>
-              <p className="pipeline-note">{importMessage}</p>
-            </div>
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              className="w-10 h-10 inline-flex items-center justify-center bg-transparent border border-border-subtle text-text-secondary hover:border-border-strong hover:text-text-primary transition-colors duration-150 cursor-pointer shrink-0"
+              aria-label="Open settings"
+            >
+              <SettingsIcon size={16} strokeWidth={1.9} />
+            </button>
           </section>
 
-          <section className="import-panel">
-            <div className="import-actions">
-              <button className="primary-button" onClick={() => void handleImportDialog()} disabled={isImporting}>
-                {isImporting ? 'Importing…' : 'Import files'}
-              </button>
-              <div className="url-import">
-                <input
-                  value={urlInput}
-                  onChange={(event) => setUrlInput(event.target.value)}
-                  placeholder="Paste a URL to save a readable article"
-                />
+          {/* Import panel */}
+          <section className="border border-border-subtle bg-[#000] p-6 mb-6 max-sm:p-[22px]">
+            <div className="grid gap-[14px]">
+              <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 items-stretch max-sm:grid-cols-1">
                 <button
-                  className="secondary-button"
-                  onClick={() => void importUrlValue(urlInput)}
+                  className="min-h-14 px-[18px] bg-text-primary text-[#000] font-bold transition-[border-color,background,color] duration-[160ms] cursor-pointer border-0 font-[inherit] disabled:opacity-60"
+                  onClick={() => void handleImportDialog()}
                   disabled={isImporting}
                 >
-                  {isImporting ? 'Importing…' : 'Save URL'}
+                  <span className="inline-flex items-center justify-center gap-2">
+                    <UploadIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                    <span>{isImporting ? 'Importing…' : 'Import files'}</span>
+                  </span>
                 </button>
+                <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 max-sm:grid-cols-1">
+                  <input
+                    className="w-full min-h-14 px-4 border border-border-strong bg-[#040404] text-text-primary font-[inherit]"
+                    value={urlInput}
+                    onChange={(event) => setUrlInput(event.target.value)}
+                    placeholder="Paste a URL to save a readable article"
+                  />
+                  <button
+                    className="min-h-14 px-[18px] bg-[#000] text-text-primary border border-border-strong transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit] disabled:opacity-60"
+                    onClick={() => void importUrlValue(urlInput)}
+                    disabled={isImporting}
+                  >
+                    <span className="inline-flex items-center justify-center gap-2">
+                      <GlobeIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                      <span>{isImporting ? 'Importing…' : 'Save URL'}</span>
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
-            <p className="import-caption">
-              Drag and drop anywhere in the library. URL imports use the Summarize CLI extraction pipeline and cache
-              the normalized result locally for offline reading.
-            </p>
           </section>
 
+          {/* Empty state */}
           {persistedState.documents.length === 0 ? (
-            <section className="import-panel">
-              <div className="section-heading">
-                <h2>Empty Library</h2>
-                <span>Start with one import</span>
+            <section className="border border-border-subtle bg-[#000] p-6">
+              <div className="flex justify-between gap-4 items-baseline mb-3">
+                <h2 className="m-0 text-base font-display font-semibold">Empty library</h2>
+                <span className="text-text-muted text-[0.95rem]">Start with one import</span>
               </div>
-              <p className="hero-description">
-                PDFs are reconstructed into semantic reading blocks, EPUBs are parsed into chapters, and web pages
-                are extracted into Markdown before they ever reach the reader.
-              </p>
+              <p className="max-w-[44ch] text-text-muted">Drop a PDF or EPUB, or paste a URL.</p>
             </section>
           ) : null}
 
-          {sections
-            .filter((section) => section.documents.length > 0)
-            .map((section) => (
-              <section key={section.title} className="library-section">
-                <div className="section-heading">
-                  <h2>{section.title}</h2>
-                  <span>{section.documents.length} items</span>
+          {/* Library section */}
+          {libraryDocuments.length > 0 ? (
+            <section className="mt-[18px]">
+              <div className="flex justify-between gap-4 items-baseline mb-3 max-sm:flex-col max-sm:items-stretch">
+                <div className="grid gap-1">
+                  <h2 className="m-0 text-base font-display font-semibold">Library</h2>
+                  <span className="text-text-muted text-[0.95rem]">{filteredLibraryDocuments.length} items</span>
                 </div>
-                <div className="document-grid">
-                  {section.documents.map((document) => {
+                <label className="w-[min(100%,320px)] flex items-center gap-[10px] min-h-12 px-[14px] border border-border-strong bg-[#040404] text-text-muted max-sm:w-full">
+                  <SearchIcon size={15} strokeWidth={1.9} aria-hidden="true" />
+                  <input
+                    ref={librarySearchRef}
+                    className="w-full min-w-0 p-0 border-0 bg-transparent text-text-primary font-[inherit] focus:outline-none"
+                    value={librarySearchQuery}
+                    onChange={(event) => setLibrarySearchQuery(event.target.value)}
+                    placeholder="Search title, author, or source"
+                  />
+                </label>
+              </div>
+              {filteredLibraryDocuments.length > 0 ? (
+                <div className="grid grid-cols-[repeat(auto-fill,240px)] justify-start gap-4 max-sm:grid-cols-2">
+                  {filteredLibraryDocuments.map((document) => {
                     const progress = persistedState.progress.find((item) => item.documentId === document.id)
+                    const coverImageUrl = resolveDocumentCoverImage(document)
+                    const progressValue = progress?.progress ?? 0
+                    const progressWidth = `${Math.max(0, Math.min(100, progressValue * 100))}%`
+                    const isDeletingDocument = deletingDocumentIds.includes(document.id)
                     return (
-                      <article
-                        key={`${section.title}-${document.id}`}
-                        className="document-card"
-                        onClick={() => openDocument(document.id)}
+                      <ContextMenu
+                        key={document.id}
+                        items={[
+                          {
+                            label: 'Open',
+                            onSelect: () => { if (!isDeletingDocument) openDocument(document.id) },
+                          },
+                          { type: 'separator' },
+                          {
+                            label: 'Remove from library',
+                            destructive: true,
+                            disabled: isDeletingDocument,
+                            onSelect: () => void handleRemoveDocument(document),
+                          },
+                        ]}
                       >
-                        <div className="cover-art" style={coverStyle(document)}>
-                          <span className="cover-type">{sourceLabel(document.sourceType)}</span>
-                          <strong>{document.title}</strong>
-                          <small>{document.author}</small>
+                      <article
+                        className={`border border-border-subtle bg-[#000] grid grid-rows-[auto_minmax(0,1fr)] gap-[14px] min-h-[420px] h-full p-3 text-left transition-[border-color,background] duration-[160ms] cursor-pointer hover:border-border-strong hover:bg-[#050505] ${isDeletingDocument ? 'opacity-70 pointer-events-none' : ''}`}
+                        onClick={() => {
+                          if (!isDeletingDocument) {
+                            openDocument(document.id)
+                          }
+                        }}
+                      >
+                        {/* Cover art */}
+                        <div
+                          className={`relative min-h-0 aspect-[0.76] p-[14px] border border-white/[0.06] flex flex-col justify-between overflow-hidden ${coverImageUrl ? '' : ''}`}
+                          style={coverImageUrl ? undefined : coverStyle(document)}
+                        >
+                          {coverImageUrl ? (
+                            <>
+                              <img
+                                className="absolute inset-0 w-full h-full object-cover"
+                                src={coverImageUrl}
+                                alt={`Cover for ${document.title}`}
+                                loading="lazy"
+                              />
+                              <div className="absolute inset-0 bg-gradient-to-b from-black/[0.12] via-black/[0.2] to-black/[0.9]" />
+                            </>
+                          ) : null}
+                          <span className="relative z-[1] inline-flex self-start items-center gap-1.5 px-2 py-[5px] border border-white/[0.12] bg-black/40 text-white/[0.82] text-[0.72rem] tracking-[0.08em] uppercase">
+                            <SourceIcon sourceType={document.sourceType} size={14} strokeWidth={1.9} />
+                            {sourceLabel(document.sourceType)}
+                          </span>
                         </div>
-                        <div className="document-meta">
-                          <div className="document-title-row">
-                            <h3>{document.title}</h3>
-                            <span>{document.metadata.estimatedMinutes} min</span>
+                        {/* Document meta */}
+                        <div className="min-w-0 flex flex-col gap-[10px]">
+                          <div className="flex items-start justify-between gap-[10px]">
+                            <p className="m-0 text-text-muted text-[0.72rem] tracking-[0.16em] uppercase">
+                              {documentAuthorLabel(document)}
+                            </p>
+                            <Tooltip content="Remove from library" side="top">
+                              <button
+                                type="button"
+                                className="inline-flex items-center min-h-0 p-0 border-0 bg-transparent text-white/[0.56] font-[inherit] cursor-pointer transition-colors duration-[160ms] hover:enabled:text-[#f3b3b3] disabled:cursor-default disabled:opacity-55"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  void handleRemoveDocument(document)
+                                }}
+                                disabled={isDeletingDocument}
+                                aria-label={`Remove ${document.title}`}
+                              >
+                                <TrashIcon size={14} strokeWidth={1.9} aria-hidden="true" />
+                              </button>
+                            </Tooltip>
                           </div>
-                          <p>{document.description}</p>
-                          <div className="document-footer">
-                            <span>{document.author}</span>
-                            <span>{progress ? formatPercent(progress.progress) : 'New'}</span>
+                          <h3 className="m-0 min-w-0 overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:3] [display:-webkit-box] text-[1.08rem] font-display font-semibold leading-[1.08] tracking-[-0.03em]">
+                            {document.title}
+                          </h3>
+                          <div className="mt-auto pt-3 border-t border-border-subtle flex items-end justify-between gap-3 text-text-muted text-[0.72rem] tracking-[0.16em] uppercase">
+                            <span>Progress</span>
+                            <strong className="text-text-primary text-[0.95rem] font-display font-semibold tracking-[-0.02em] normal-case">
+                              {progress ? formatPercent(progressValue) : 'Not started'}
+                            </strong>
                           </div>
-                          <div className="progress-track">
-                            <div
-                              className="progress-fill"
-                              style={{ width: `${Math.max(6, (progress?.progress ?? 0) * 100)}%` }}
-                            />
+                          <div className="h-1.5 bg-white/[0.08] overflow-hidden" aria-hidden="true">
+                            <div className="h-full bg-text-primary" style={{ width: progressWidth }} />
                           </div>
                         </div>
                       </article>
+                      </ContextMenu>
                     )
                   })}
                 </div>
-              </section>
-            ))}
+              ) : (
+                <p className="text-text-muted pt-2">No library items match that search.</p>
+              )}
+            </section>
+          ) : null}
         </main>
       ) : null}
 
       {mode === 'reader' && activeDocument ? (
-        <section className="reader-shell">
-          <aside className={`reader-sidebar ${activePanel ? 'visible' : ''}`}>
-            {activePanel === 'toc' ? (
-              <div className="panel-content">
-                <div className="panel-header">
-                  <h2>Contents</h2>
-                  <button onClick={() => setActivePanel(null)}>Close</button>
-                </div>
-                {activeDocument.toc.map((item) => (
+        <section
+          className={`min-h-screen bg-bg-page grid transition-[grid-template-columns] duration-[180ms] relative max-sm:block ${isSidebarOpen ? 'grid-cols-[320px_minmax(0,1fr)]' : 'grid-cols-[0_minmax(0,1fr)]'}`}
+        >
+          {/* Sidebar */}
+          <aside
+            className={`sticky top-0 h-screen overflow-y-auto border-r border-border-subtle bg-[#000] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden transition-[transform,opacity,border-color] duration-[180ms] max-sm:fixed max-sm:top-0 max-sm:left-0 max-sm:bottom-0 max-sm:w-screen max-sm:h-screen max-sm:z-30 ${
+              isSidebarOpen
+                ? 'max-sm:translate-x-0 max-sm:pointer-events-auto'
+                : 'translate-x-[-100%] opacity-0 pointer-events-none border-transparent max-sm:opacity-100 max-sm:border-border-subtle'
+            }`}
+          >
+            <div className="min-h-full flex flex-col">
+              {/* Sidebar top */}
+              <div className="px-[18px] pt-[18px] pb-[18px] border-b border-border-subtle">
+                <div className="mb-[18px] flex items-center justify-between gap-[10px]">
                   <button
-                    key={item.id}
-                    className={`toc-item toc-level-${item.level}`}
-                    onClick={() => jumpToLocation(item.chapterId, item.blockId)}
+                    className="min-h-14 px-[18px] bg-transparent text-text-secondary border border-border-subtle transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                    onClick={exitReader}
                   >
-                    {item.title}
+                    <span className="inline-flex items-center justify-center gap-2">
+                      <ChevronLeftIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                      <span>Library</span>
+                    </span>
                   </button>
-                ))}
+                  <div className="inline-flex items-center gap-[10px]">
+                    <Tooltip content="Collapse sidebar" shortcut="Mod+B" side="bottom">
+                      <button
+                        className="w-[42px] h-[42px] min-h-0 p-0 inline-flex items-center justify-center bg-transparent text-text-secondary border border-border-subtle transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                        onClick={() => setIsSidebarOpen(false)}
+                        aria-label="Collapse sidebar"
+                      >
+                        <PanelLeftCloseIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                      </button>
+                    </Tooltip>
+                  </div>
+                </div>
+                <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted inline-flex items-center gap-1.5">
+                  <SourceIcon sourceType={activeDocument.sourceType} size={13} strokeWidth={1.9} />
+                  {sourceLabel(activeDocument.sourceType)}
+                </p>
+                <h1 className="m-0 text-[1.65rem] font-display font-bold leading-[1.02] tracking-[-0.04em]">
+                  {activeDocument.title}
+                </h1>
+                <p className="mt-2 text-text-muted font-ui text-[0.88rem] tracking-[0.03em]">
+                  {activeDocument.author}
+                </p>
               </div>
-            ) : null}
 
-            {activePanel === 'search' ? (
-              <div className="panel-content">
-                <div className="panel-header">
-                  <h2>Search</h2>
-                  <button onClick={() => setActivePanel(null)}>Close</button>
+              {/* Sidebar main */}
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                {/* Tab bar */}
+                <div
+                  className="grid grid-cols-3 border-b border-border-subtle max-sm:sticky max-sm:top-0 max-sm:bg-[#000]"
+                  role="tablist"
+                  aria-label="Reader panels"
+                >
+                  {readerTabs.map((tab) => {
+                    const Icon = tab.icon
+                    return (
+                      <Tooltip key={tab.id} content={tab.label} shortcut={tab.shortcut} side="bottom">
+                        <button
+                          className={`inline-flex items-center justify-center gap-2 min-w-0 min-h-[52px] px-3 py-[11px] border-0 border-r border-r-border-subtle last:border-r-0 bg-transparent text-text-muted cursor-pointer transition-[border-color,background,color] duration-[160ms] font-[inherit] hover:bg-white/[0.04] hover:text-text-primary ${visibleReaderPanel === tab.id ? 'text-text-primary bg-[#070707]' : ''}`}
+                          onClick={() => {
+                            setActivePanel(tab.id)
+                            setIsSidebarOpen(true)
+                          }}
+                        >
+                          <span className="min-w-0 inline-flex items-center gap-2">
+                            <Icon size={15} strokeWidth={1.9} aria-hidden="true" />
+                            <span className="whitespace-nowrap">{tab.label}</span>
+                          </span>
+                        </button>
+                      </Tooltip>
+                    )
+                  })}
                 </div>
-                <input
-                  className="panel-input"
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Search the current document"
-                />
-                <div className="result-list">
-                  {searchResults.map((result: SearchResult) => (
-                    <button
-                      key={result.id}
-                      className="search-result"
-                      onClick={() => jumpToLocation(result.chapterId, result.blockId)}
-                    >
-                      <strong>{result.chapterTitle}</strong>
-                      <span>{result.context}</span>
-                    </button>
-                  ))}
-                  {searchQuery && searchResults.length === 0 ? (
-                    <p className="empty-state">No matches in this document.</p>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
 
-            {activePanel === 'notes' ? (
-              <div className="panel-content">
-                <div className="panel-header">
-                  <h2>Annotations</h2>
-                  <button onClick={() => setActivePanel(null)}>Close</button>
+                {/* Mode row */}
+                <div className="flex items-center justify-between gap-3 px-[18px] pb-[18px] pt-3 border-b border-border-subtle max-sm:px-[18px]">
+                  <div className="flex items-center min-h-[42px] text-text-muted text-[0.88rem] tracking-[0.03em] tabular-nums">
+                    <span>
+                      {activeReadingMode === 'page'
+                        ? `Page ${pageIndex + 1} / ${pageCount}`
+                        : formatPercent(activeProgress?.progress ?? 0)}
+                    </span>
+                  </div>
+                  <div
+                    className="inline-flex items-center border border-border-subtle bg-[#030303]"
+                    role="tablist"
+                    aria-label="Reading mode"
+                  >
+                    <Tooltip content="Page mode" shortcut="Mod+Shift+M" side="bottom">
+                      <button
+                        className={`inline-flex items-center justify-center w-10 h-10 border-0 cursor-pointer font-[inherit] transition-[background,color] duration-[160ms] ${activeReadingMode === 'page' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
+                        onClick={() => setReadingMode('page')}
+                        aria-label="Use paged reading mode"
+                      >
+                        <BookOpenIcon size={15} strokeWidth={1.9} aria-hidden="true" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip content="Scroll mode" shortcut="Mod+Shift+M" side="bottom">
+                      <button
+                        className={`inline-flex items-center justify-center w-10 h-10 border-0 border-l border-border-subtle cursor-pointer font-[inherit] transition-[background,color] duration-[160ms] ${activeReadingMode === 'scroll' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
+                        onClick={() => setReadingMode('scroll')}
+                        aria-label="Use scroll reading mode"
+                      >
+                        <AlignJustifyIcon size={15} strokeWidth={1.9} aria-hidden="true" />
+                      </button>
+                    </Tooltip>
+                  </div>
                 </div>
-                <div className="annotation-group">
-                  <h3>Bookmarks</h3>
-                  {documentBookmarks.map((bookmark: Bookmark) => (
-                    <button
-                      key={bookmark.id}
-                      className="annotation-item"
-                      onClick={() => jumpToLocation(bookmark.chapterId, bookmark.blockId)}
-                    >
-                      <strong>{bookmark.label}</strong>
-                      <span>{formatDate(bookmark.createdAt)}</span>
-                    </button>
-                  ))}
-                  {documentBookmarks.length === 0 ? <p className="empty-state">No bookmarks yet.</p> : null}
-                </div>
-                <div className="annotation-group">
-                  <h3>Highlights</h3>
-                  {documentHighlights.map((highlight: Highlight) => (
-                    <button
-                      key={highlight.id}
-                      className="annotation-item"
-                      onClick={() => jumpToLocation(highlight.chapterId, highlight.blockId)}
-                    >
-                      <strong>{highlight.text}</strong>
-                      <span>{formatDate(highlight.createdAt)}</span>
-                    </button>
-                  ))}
-                  {documentHighlights.length === 0 ? <p className="empty-state">Select text to highlight.</p> : null}
-                </div>
+
+                {/* TOC panel */}
+                {visibleReaderPanel === 'toc' ? (
+                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pb-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-[18px] py-5">
+                    <div className="flex justify-between items-center gap-3 mb-4">
+                      <div className="grid gap-1">
+                        <span className="inline-flex items-center gap-1.5 text-text-muted text-[0.72rem] tracking-[0.12em] uppercase">
+                          <ListIcon size={14} strokeWidth={1.9} aria-hidden="true" />
+                          Contents
+                        </span>
+                        <h2 className="m-0 text-base font-display font-semibold tracking-[-0.03em]">
+                          Navigate the document
+                        </h2>
+                      </div>
+                    </div>
+                    <div className="grid gap-2">
+                      {tocGroups.map((group) => {
+                        const isExpanded = expandedTocChapters.includes(group.chapterId)
+                        const isActiveChapter =
+                          activeProgress?.chapterId === group.chapterId ||
+                          group.items.some((item) => item.blockId === activeProgress?.blockId)
+
+                        return (
+                          <section key={group.chapterId} className="grid gap-2">
+                            <button
+                              className={`w-full px-[13px] py-3 flex items-center gap-[10px] border border-border-subtle bg-white/[0.02] text-text-primary text-left transition-[border-color,background] duration-[160ms] cursor-pointer font-[inherit] hover:border-border-strong hover:bg-white/[0.04] ${isActiveChapter || isExpanded ? 'border-border-strong bg-white/[0.06]' : ''}`}
+                              aria-expanded={isExpanded}
+                              onClick={() => {
+                                if (group.items.length === 0) {
+                                  jumpToLocation(group.chapterId, group.blockId)
+                                  return
+                                }
+
+                                setExpandedTocChapters((current) =>
+                                  current.includes(group.chapterId)
+                                    ? current.filter((chapterId) => chapterId !== group.chapterId)
+                                    : [...current, group.chapterId],
+                                )
+                              }}
+                            >
+                              <span className="min-w-0 inline-flex items-center gap-[10px]">
+                                <ChevronRightIcon
+                                  className={`shrink-0 transition-transform duration-[160ms] ${isExpanded ? 'rotate-90' : ''}`}
+                                  size={15}
+                                  strokeWidth={1.9}
+                                  aria-hidden="true"
+                                />
+                                <span className="min-w-0">{group.title}</span>
+                              </span>
+                            </button>
+                            {isExpanded ? (
+                              <div className="grid gap-2 ml-3 pl-3 border-l border-border-subtle">
+                                {group.items.map((item) => (
+                                  <button
+                                    key={item.id}
+                                    className={`${listItemBase} ${listItemHover} flex items-center gap-[10px] ${item.level === 2 ? 'pl-3' : item.level === 3 ? 'pl-[18px]' : ''} ${activeProgress?.blockId === item.blockId ? listItemActive : ''}`}
+                                    onClick={() => jumpToLocation(item.chapterId, item.blockId)}
+                                  >
+                                    <span className="min-w-0 inline-flex items-center gap-[9px]">
+                                      <ListIcon size={13} strokeWidth={1.9} aria-hidden="true" className="shrink-0" />
+                                      <span className="min-w-0">{item.title}</span>
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </section>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Notes panel */}
+                {visibleReaderPanel === 'notes' ? (
+                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pb-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-[18px] py-5">
+                    <div className="flex justify-between items-center gap-3 mb-4">
+                      <div className="grid gap-1">
+                        <span className="inline-flex items-center gap-1.5 text-text-muted text-[0.72rem] tracking-[0.12em] uppercase">
+                          <NotebookPenIcon size={14} strokeWidth={1.9} aria-hidden="true" />
+                          Notes
+                        </span>
+                        <h2 className="m-0 text-base font-display font-semibold tracking-[-0.03em]">
+                          Bookmarks and highlights
+                        </h2>
+                      </div>
+                      <button
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-border-subtle bg-transparent text-text-secondary cursor-pointer font-[inherit]"
+                        onClick={() => setActivePanel('toc')}
+                      >
+                        <XIcon size={15} strokeWidth={1.9} aria-hidden="true" />
+                        Done
+                      </button>
+                    </div>
+                    {/* Bookmarks */}
+                    <div className="mt-4">
+                      <div className="inline-flex items-center gap-2 mb-[10px] text-text-secondary">
+                        <BookmarkIcon size={14} strokeWidth={1.9} aria-hidden="true" />
+                        <h3 className="m-0">Bookmarks</h3>
+                      </div>
+                      {documentBookmarks.map((bookmark: Bookmark) => (
+                        <ContextMenu
+                          key={bookmark.id}
+                          items={[
+                            {
+                              label: 'Jump to location',
+                              onSelect: () => jumpToLocation(bookmark.chapterId, bookmark.blockId),
+                            },
+                            { type: 'separator' },
+                            {
+                              label: 'Remove bookmark',
+                              destructive: true,
+                              onSelect: () => void removeBookmarkById(bookmark.id),
+                            },
+                          ]}
+                        >
+                          <button
+                            className={`${listItemBase} ${listItemHover} mt-[10px] first:mt-0 ${activeProgress?.blockId === bookmark.blockId ? listItemActive : ''}`}
+                            onClick={() => jumpToLocation(bookmark.chapterId, bookmark.blockId)}
+                          >
+                            <strong className="block mb-1">{bookmark.label}</strong>
+                            <span className="text-text-muted">{formatDate(bookmark.createdAt)}</span>
+                          </button>
+                        </ContextMenu>
+                      ))}
+                      {documentBookmarks.length === 0 ? (
+                        <p className="text-text-muted m-0 pt-[14px]">No bookmarks yet.</p>
+                      ) : null}
+                    </div>
+                    {/* Highlights */}
+                    <div className="mt-[22px]">
+                      <div className="inline-flex items-center gap-2 mb-[10px] text-text-secondary">
+                        <HighlighterIcon size={14} strokeWidth={1.9} aria-hidden="true" />
+                        <h3 className="m-0">Highlights</h3>
+                      </div>
+                      {documentHighlights.map((highlight: Highlight) => (
+                        <ContextMenu
+                          key={highlight.id}
+                          items={[
+                            {
+                              label: 'Jump to location',
+                              onSelect: () => jumpToLocation(highlight.chapterId, highlight.blockId),
+                            },
+                            { type: 'separator' },
+                            {
+                              label: 'Remove highlight',
+                              destructive: true,
+                              onSelect: () => void removeHighlightById(highlight.id),
+                            },
+                          ]}
+                        >
+                          <button
+                            className={`${listItemBase} ${listItemHover} mt-[10px] first:mt-0 ${activeProgress?.blockId === highlight.blockId ? listItemActive : ''}`}
+                            onClick={() => jumpToLocation(highlight.chapterId, highlight.blockId)}
+                          >
+                            <strong className="block mb-1">{highlight.text}</strong>
+                            <span className="text-text-muted">{formatDate(highlight.createdAt)}</span>
+                          </button>
+                        </ContextMenu>
+                      ))}
+                      {documentHighlights.length === 0 ? (
+                        <p className="text-text-muted m-0 pt-[14px]">Select text to highlight.</p>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+            </div>
           </aside>
 
-          <div className={`reader-controls ${controlsVisible ? 'visible' : ''}`}>
-            <div className="reader-topbar">
-              <button className="secondary-button" onClick={exitReader}>
-                Library
-              </button>
-              <div className="reader-title">
-                <strong>{activeDocument.title}</strong>
-                <span>
-                  {activeDocument.author} · {formatPercent(activeProgress?.progress ?? 0)}
-                </span>
-              </div>
-              <div className="reader-actions">
-                <button className="ghost-button" onClick={() => setActivePanel(activePanel === 'toc' ? null : 'toc')}>
-                  TOC
-                </button>
-                <button
-                  className="ghost-button"
-                  onClick={() => setActivePanel(activePanel === 'search' ? null : 'search')}
-                >
-                  Search
-                </button>
-                <button
-                  className="ghost-button"
-                  onClick={() => setActivePanel(activePanel === 'notes' ? null : 'notes')}
-                >
-                  Notes
-                </button>
-              </div>
-            </div>
-            <div className="reader-bottombar">
-              <button className="ghost-button" onClick={toggleReadingMode}>
-                {activeReadingMode === 'scroll' ? 'Switch to page mode' : 'Switch to scroll mode'}
-              </button>
-              <button className="ghost-button" onClick={() => void addBookmark()}>
-                Add bookmark
-              </button>
-              <label>
-                Font
-                <input
-                  type="range"
-                  min="16"
-                  max="24"
-                  value={persistedState.preferences.fontSize}
-                  onChange={(event) =>
-                    queuePreferenceSave({
-                      ...persistedState.preferences,
-                      fontSize: Number(event.target.value),
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Width
-                <input
-                  type="range"
-                  min="680"
-                  max="820"
-                  value={persistedState.preferences.readingWidth}
-                  onChange={(event) =>
-                    queuePreferenceSave({
-                      ...persistedState.preferences,
-                      readingWidth: Number(event.target.value),
-                    })
-                  }
-                />
-              </label>
-            </div>
-          </div>
-
-          {selectionDraft ? (
-            <button
-              className="selection-popover"
-              style={{
-                left: selectionDraft.x,
-                top: selectionDraft.y,
+          {/* Reader search overlay */}
+          {isReaderSearchOpen ? (
+            <ReaderSearchBar
+              searchQuery={searchQuery}
+              searchResults={searchResults}
+              searchResultIndex={searchResultIndex}
+              onQueryChange={setSearchQuery}
+              onNavigate={(delta) => {
+                setSearchResultIndex((i) => {
+                  const len = Math.max(1, searchResults.length)
+                  return ((i + delta) % len + len) % len
+                })
               }}
-              onClick={() => void addHighlight()}
-            >
-              Highlight
-            </button>
+              onClose={() => { setIsReaderSearchOpen(false); setSearchQuery('') }}
+              inputRef={readerSearchRef}
+            />
           ) : null}
 
+          {/* Selection popover */}
+          {selectionDraft ? (
+            <SelectionPopover
+              x={selectionDraft.x}
+              y={selectionDraft.y}
+              onClick={() => void addHighlight()}
+            />
+          ) : null}
+
+          {/* Reader surface */}
           <div
             ref={readerRef}
-            className={`reader-surface mode-${activeReadingMode}`}
+            className={`min-h-screen overflow-y-auto relative ${activeReadingMode === 'page' ? 'overflow-hidden p-0' : 'py-6 pb-[88px] max-sm:pt-5'}`}
             onScroll={handleReaderScroll}
             onMouseUp={handleSelectionChange}
             onKeyUp={handleSelectionChange}
           >
+            {!isSidebarOpen ? (
+              <Tooltip content="Open sidebar" shortcut="Mod+B" side="right">
+                <button
+                  className="fixed top-[22px] left-[22px] z-20 w-[42px] h-[42px] min-h-0 p-0 inline-flex items-center justify-center bg-black/[0.82] backdrop-blur-[12px] border border-border-subtle text-text-secondary cursor-pointer font-[inherit] max-sm:top-4 max-sm:left-4"
+                  onClick={() => setIsSidebarOpen(true)}
+                  aria-label="Open sidebar"
+                >
+                  <PanelLeftOpenIcon size={17} strokeWidth={1.9} aria-hidden="true" />
+                </button>
+              </Tooltip>
+            ) : null}
             <div
-              className="reader-column"
-              style={{
-                maxWidth: `${clamp(
-                  persistedState.preferences.readingWidth,
-                  defaultPreferences.readingWidth,
-                  defaultPreferences.readingWidth + 100,
-                )}px`,
-                fontSize: `${persistedState.preferences.fontSize}px`,
-              }}
+              className={`w-[min(100%,var(--reader-width,840px))] mx-auto font-reading leading-[1.78] ${activeReadingMode === 'page' ? 'flex flex-col h-screen px-10 pt-[26px] pb-[18px] max-sm:px-[18px] max-sm:pt-5 max-sm:pb-[14px]' : 'px-10 pt-8 pb-12 max-sm:px-[18px] max-sm:pb-10'}`}
+              style={readerColumnStyle}
             >
-              <header className="document-header">
-                <p className="eyebrow">{sourceLabel(activeDocument.sourceType)}</p>
-                <h1>{activeDocument.title}</h1>
-                <p>{activeDocument.description}</p>
-                <div className="document-tags">
-                  <span>{activeDocument.author}</span>
-                  <span>{activeDocument.metadata.estimatedMinutes} min</span>
-                  <span>{activeDocument.metadata.extractedWith}</span>
-                </div>
-                {activeDocument.metadata.note ? <p className="document-note">{activeDocument.metadata.note}</p> : null}
-              </header>
-
               {activeReadingMode === 'scroll'
                 ? activeDocument.chapters.map((chapter) => (
-                    <section key={chapter.id} className="chapter-block">
-                      <h2>{chapter.title}</h2>
+                    <section
+                      key={chapter.id}
+                      className="[content-visibility:auto] [contain-intrinsic-size:900px] [&+&]:mt-14"
+                    >
+                      {!isUtilityHeading(chapter.title) ? (
+                        <h2 className="m-0 mb-5 text-[0.78rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
+                          {chapter.title}
+                        </h2>
+                      ) : null}
                       {chapter.content.map((block) => (
                         <ReaderBlockView
                           key={block.id}
@@ -1237,47 +2313,73 @@ function App() {
                           chapterId={chapter.id}
                           documentId={activeDocument.id}
                           highlights={documentHighlights}
+                          searchQuery={isReaderSearchOpen ? searchQuery : ''}
+                          activeSearchBlockId={activeSearchBlockId}
+                          onPreviewImage={setPreviewImage}
                         />
                       ))}
                     </section>
                   ))
                 : (
-                    <div className="page-mode">
-                      <article className="page-card">
-                        {pages[pageIndex]?.map((entry) => (
-                          <ReaderBlockView
-                            key={entry.block.id}
-                            block={entry.block}
-                            chapterId={entry.chapterId}
-                            documentId={activeDocument.id}
-                            highlights={documentHighlights}
-                          />
-                        ))}
-                      </article>
-                      <div className="page-controls">
+                    <div className="relative flex flex-1 flex-col gap-[10px]">
+                      <div ref={pageViewportRef} className="flex-1 min-h-0 overflow-hidden">
+                        <article className={`h-full overflow-hidden ${pages.length === 0 ? 'invisible' : ''}`}>
+                          {currentPageEntries.map((entry) => (
+                            <PageEntryView
+                              key={entry.id}
+                              entry={entry}
+                              documentId={activeDocument.id}
+                              highlights={documentHighlights}
+                              searchQuery={isReaderSearchOpen ? searchQuery : ''}
+                              activeSearchBlockId={activeSearchBlockId}
+                              onPreviewImage={setPreviewImage}
+                            />
+                          ))}
+                        </article>
+                      </div>
+                      <div className={`flex justify-center items-center gap-3 text-text-muted font-ui text-[0.9rem] tabular-nums max-sm:flex-col max-sm:items-stretch ${pages.length === 0 ? 'invisible' : ''}`}>
                         <button
-                          className="secondary-button"
-                          onClick={() => setPageIndex((current) => clamp(current - 1, 0, Math.max(0, pages.length - 1)))}
+                          className="inline-flex items-center justify-center w-10 h-10 min-h-0 p-0 bg-[#000] text-text-primary border border-border-strong transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                          onClick={() => changePage(-1)}
                         >
-                          Previous
+                          <ChevronLeftIcon size={16} strokeWidth={1.9} aria-hidden="true" />
                         </button>
-                        <span>
-                          Page {Math.min(pageIndex + 1, Math.max(1, pages.length))} of {Math.max(1, pages.length)}
+                        <span className="min-w-[12ch] text-center">
+                          Page {Math.min(pageIndex + 1, Math.max(1, pageCount))} of {Math.max(1, pageCount)}
                         </span>
                         <button
-                          className="secondary-button"
-                          onClick={() => setPageIndex((current) => clamp(current + 1, 0, Math.max(0, pages.length - 1)))}
+                          className="inline-flex items-center justify-center w-10 h-10 min-h-0 p-0 bg-[#000] text-text-primary border border-border-strong transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                          onClick={() => changePage(1)}
                         >
-                          Next
+                          <ChevronRightIcon size={16} strokeWidth={1.9} aria-hidden="true" />
                         </button>
+                      </div>
+                      <div
+                        ref={pageMeasureRef}
+                        className="absolute inset-0 -z-[1] overflow-hidden invisible pointer-events-none"
+                        aria-hidden="true"
+                      >
+                        <article className="h-auto">{pageMeasureContent}</article>
                       </div>
                     </div>
                   )}
             </div>
           </div>
+
+          {/* Image lightbox */}
+          {previewImage ? (
+            <ImageLightbox image={previewImage} onClose={() => setPreviewImage(null)} />
+          ) : null}
         </section>
       ) : null}
+
+      {confirmDialog ? (
+        <ConfirmDialog dialog={confirmDialog} onDismiss={() => setConfirmDialog(null)} />
+      ) : null}
+
+      <SettingsPage open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
+    </TooltipProvider>
   )
 }
 

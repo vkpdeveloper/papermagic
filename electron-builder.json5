@@ -9,7 +9,21 @@
   },
   "files": [
     "dist",
-    "dist-electron"
+    "dist-electron",
+    {
+      "from": "node_modules",
+      "to": "node_modules",
+      "filter": [
+        "@google/**",
+        "@opentelemetry/**",
+        "ai-sdk-provider-gemini-cli/**",
+        "web-tree-sitter/**",
+        "@ai-sdk/**",
+        "ai/**",
+        "zod/**",
+        "zod-to-json-schema/**"
+      ]
+    }
   ],
   "mac": {
     "target": [

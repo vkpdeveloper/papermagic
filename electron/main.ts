@@ -16,6 +16,11 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 let win: BrowserWindow | null
 let libraryStore: ReturnType<typeof createLibraryStore> | null = null
 
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('no-sandbox')
+  app.commandLine.appendSwitch('disable-setuid-sandbox')
+}
+
 function createWindow() {
   win = new BrowserWindow({
     title: 'Paper Magic',
@@ -65,10 +70,17 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('paper:import-paths', (_event, paths: string[]) => requireStore().importPaths(paths))
   ipcMain.handle('paper:import-url', (_event, url: string) => requireStore().importUrl(url))
+  ipcMain.handle('paper:remove-document', (_event, documentId: string) => requireStore().removeDocument(documentId))
   ipcMain.handle('paper:save-progress', (_event, progress) => requireStore().saveProgress(progress))
   ipcMain.handle('paper:save-preferences', (_event, preferences) => requireStore().savePreferences(preferences))
   ipcMain.handle('paper:add-bookmark', (_event, bookmark) => requireStore().addBookmark(bookmark))
   ipcMain.handle('paper:add-highlight', (_event, highlight) => requireStore().addHighlight(highlight))
+  ipcMain.handle('paper:remove-highlight', (_event, highlightId: string) => requireStore().removeHighlight(highlightId))
+  ipcMain.handle('paper:remove-bookmark', (_event, bookmarkId: string) => requireStore().removeBookmark(bookmarkId))
+  ipcMain.handle('paper:load-settings', () => requireStore().loadSettings())
+  ipcMain.handle('paper:save-settings', (_event, settings) => requireStore().saveSettings(settings))
+  ipcMain.handle('paper:validate-api-key', (_event, provider, apiKey, modelId) => requireStore().validateApiKey(provider, apiKey, modelId))
+  ipcMain.handle('paper:get-provider-models', (_event, provider) => requireStore().getProviderModels(provider))
 }
 
 app.on('window-all-closed', () => {

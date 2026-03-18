@@ -4,6 +4,7 @@ import Database from 'better-sqlite3'
 import { asc, desc, eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import type {
+  AppSettings,
   Bookmark,
   BookmarkInput,
   Chapter,
@@ -26,6 +27,7 @@ import {
   preferencesTable,
   progressTable,
   schema,
+  settingsTable,
 } from './schema'
 
 function parseJson<T>(value: string): T {
@@ -43,6 +45,44 @@ export interface DatabaseContext {
   libraryRoot: string
 }
 
+function tableHasColumn(connection: Database.Database, tableName: string, columnName: string): boolean {
+  const columns = connection.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
+  return columns.some((column) => column.name === columnName)
+}
+
+function readCoverImageUrlFromMetadataJson(metadataJson: string): string | null {
+  try {
+    const metadata = JSON.parse(metadataJson) as DocumentMetadata
+    return typeof metadata.coverImageUrl === 'string' && metadata.coverImageUrl.length > 0 ? metadata.coverImageUrl : null
+  } catch {
+    return null
+  }
+}
+
+function ensureDocumentCoverImageColumn(connection: Database.Database): void {
+  if (!tableHasColumn(connection, 'documents', 'cover_image_url')) {
+    connection.exec('ALTER TABLE documents ADD COLUMN cover_image_url TEXT;')
+  }
+}
+
+function backfillDocumentCoverImageReferences(connection: Database.Database): void {
+  const rows = connection
+    .prepare('SELECT id, metadata_json, cover_image_url FROM documents WHERE cover_image_url IS NULL OR cover_image_url = ?')
+    .all('') as Array<{ id: string; metadata_json: string; cover_image_url: string | null }>
+
+  const updateStatement = connection.prepare('UPDATE documents SET cover_image_url = ? WHERE id = ?')
+
+  for (const row of rows) {
+    const coverImageUrl = readCoverImageUrlFromMetadataJson(row.metadata_json)
+
+    if (!coverImageUrl) {
+      continue
+    }
+
+    updateStatement.run(coverImageUrl, row.id)
+  }
+}
+
 function createTables(connection: Database.Database): void {
   connection.exec(`
     PRAGMA journal_mode = WAL;
@@ -54,6 +94,7 @@ function createTables(connection: Database.Database): void {
       title TEXT NOT NULL,
       author TEXT NOT NULL,
       cover_hue INTEGER NOT NULL,
+      cover_image_url TEXT,
       source_type TEXT NOT NULL,
       description TEXT NOT NULL,
       toc_json TEXT NOT NULL,
@@ -121,7 +162,17 @@ function createTables(connection: Database.Database): void {
 
     CREATE VIRTUAL TABLE IF NOT EXISTS documents_search
       USING fts5(document_id UNINDEXED, title, author, content);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      id INTEGER PRIMARY KEY,
+      ai_enabled INTEGER NOT NULL DEFAULT 0,
+      ai_provider TEXT,
+      ai_model TEXT
+    );
   `)
+
+  ensureDocumentCoverImageColumn(connection)
+  backfillDocumentCoverImageReferences(connection)
 }
 
 export function createDatabaseContext(userDataPath: string): DatabaseContext {
@@ -157,18 +208,26 @@ function hydrateDocuments(context: DatabaseContext): DocumentRecord[] {
   })
 
   return documentRows
-    .map((row) => ({
-      id: row.id,
-      title: row.title,
-      author: row.author,
-      coverHue: row.coverHue,
-      sourceType: row.sourceType as DocumentRecord['sourceType'],
-      description: row.description,
-      chapters: chapterMap.get(row.id) ?? [],
-      toc: parseJson<TocItem[]>(row.tocJson),
-      metadata: parseJson<DocumentMetadata>(row.metadataJson),
-      preferredMode: row.preferredMode as DocumentRecord['preferredMode'],
-    }))
+    .map((row) => {
+      const metadata = parseJson<DocumentMetadata>(row.metadataJson)
+
+      if (row.coverImageUrl && metadata.coverImageUrl !== row.coverImageUrl) {
+        metadata.coverImageUrl = row.coverImageUrl
+      }
+
+      return {
+        id: row.id,
+        title: row.title,
+        author: row.author,
+        coverHue: row.coverHue,
+        sourceType: row.sourceType as DocumentRecord['sourceType'],
+        description: row.description,
+        chapters: chapterMap.get(row.id) ?? [],
+        toc: parseJson<TocItem[]>(row.tocJson),
+        metadata,
+        preferredMode: row.preferredMode as DocumentRecord['preferredMode'],
+      }
+    })
     .sort(
       (left, right) =>
         new Date(right.metadata.importedAt).getTime() - new Date(left.metadata.importedAt).getTime(),
@@ -247,6 +306,7 @@ export function upsertDocument(context: DatabaseContext, document: DocumentRecor
         title: document.title,
         author: document.author,
         coverHue: document.coverHue,
+        coverImageUrl: document.metadata.coverImageUrl ?? null,
         sourceType: document.sourceType,
         description: document.description,
         tocJson: JSON.stringify(document.toc),
@@ -259,6 +319,7 @@ export function upsertDocument(context: DatabaseContext, document: DocumentRecor
           title: document.title,
           author: document.author,
           coverHue: document.coverHue,
+          coverImageUrl: document.metadata.coverImageUrl ?? null,
           sourceType: document.sourceType,
           description: document.description,
           tocJson: JSON.stringify(document.toc),
@@ -317,7 +378,7 @@ export function saveProgress(context: DatabaseContext, progress: ReadingProgress
 export function savePreferences(context: DatabaseContext, preferences: ReaderPreferences): ReaderPreferences {
   const nextPreferences = {
     fontSize: Math.min(24, Math.max(16, Math.round(preferences.fontSize))),
-    readingWidth: Math.min(820, Math.max(680, Math.round(preferences.readingWidth))),
+    readingWidth: Math.min(1040, Math.max(700, Math.round(preferences.readingWidth))),
   }
 
   context.db
@@ -355,6 +416,10 @@ export function addHighlight(context: DatabaseContext, highlight: Highlight): Hi
   return highlight
 }
 
+export function removeHighlight(context: DatabaseContext, highlightId: string): void {
+  context.db.delete(highlightsTable).where(eq(highlightsTable.id, highlightId)).run()
+}
+
 export function addBookmark(context: DatabaseContext, bookmark: Bookmark): Bookmark {
   context.db
     .insert(bookmarksTable)
@@ -369,6 +434,10 @@ export function addBookmark(context: DatabaseContext, bookmark: Bookmark): Bookm
     .run()
 
   return bookmark
+}
+
+export function removeBookmark(context: DatabaseContext, bookmarkId: string): void {
+  context.db.delete(bookmarksTable).where(eq(bookmarksTable.id, bookmarkId)).run()
 }
 
 export function buildHighlight(input: HighlightInput): Highlight {
@@ -427,4 +496,50 @@ export function findExistingDocumentBySource(
   }
 
   return null
+}
+
+const defaultSettings: AppSettings = {
+  aiEnabled: false,
+  aiProvider: null,
+  aiModel: null,
+  aiApiKey: null,
+}
+
+export function loadSettings(context: DatabaseContext): AppSettings {
+  const row = context.db.select().from(settingsTable).where(eq(settingsTable.id, 1)).get()
+
+  if (!row) {
+    return defaultSettings
+  }
+
+  return {
+    aiEnabled: row.aiEnabled,
+    aiProvider: (row.aiProvider as AppSettings['aiProvider']) ?? null,
+    aiModel: row.aiModel ?? null,
+    aiApiKey: row.aiApiKey ?? null,
+  }
+}
+
+export function saveSettings(context: DatabaseContext, settings: AppSettings): AppSettings {
+  context.db
+    .insert(settingsTable)
+    .values({
+      id: 1,
+      aiEnabled: settings.aiEnabled,
+      aiProvider: settings.aiProvider ?? null,
+      aiModel: settings.aiModel ?? null,
+      aiApiKey: settings.aiApiKey ?? null,
+    })
+    .onConflictDoUpdate({
+      target: settingsTable.id,
+      set: {
+        aiEnabled: settings.aiEnabled,
+        aiProvider: settings.aiProvider ?? null,
+        aiModel: settings.aiModel ?? null,
+        aiApiKey: settings.aiApiKey ?? null,
+      },
+    })
+    .run()
+
+  return settings
 }

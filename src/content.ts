@@ -10,6 +10,9 @@ import type {
 } from './types'
 
 const WORDS_PER_MINUTE = 215
+export const CURRENT_IMPORT_VERSION = 3
+export const UNREADABLE_IMPORT_MESSAGE =
+  'This document was imported successfully, but no readable text could be extracted from the source.'
 
 export function createId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`
@@ -29,6 +32,11 @@ function stripMarkdown(text: string): string {
 
 function normalizeLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
+}
+
+export function isUtilityHeading(text: string): boolean {
+  const normalized = normalizeLine(text)
+  return /^\d{1,3}$/.test(normalized)
 }
 
 function countWords(chapters: Chapter[]): number {
@@ -51,16 +59,18 @@ export function buildToc(chapters: Chapter[]): TocItem[] {
   const items: TocItem[] = []
 
   chapters.forEach((chapter) => {
-    items.push({
-      id: `${chapter.id}-toc`,
-      title: chapter.title,
-      chapterId: chapter.id,
-      blockId: chapter.content[0]?.id ?? chapter.id,
-      level: 1,
-    })
+    if (!isUtilityHeading(chapter.title)) {
+      items.push({
+        id: `${chapter.id}-toc`,
+        title: chapter.title,
+        chapterId: chapter.id,
+        blockId: chapter.content[0]?.id ?? chapter.id,
+        level: 1,
+      })
+    }
 
     chapter.content.forEach((block) => {
-      if (block.type === 'heading' && block.text) {
+      if (block.type === 'heading' && block.text && !isUtilityHeading(block.text)) {
         items.push({
           id: `${block.id}-toc`,
           title: block.text,
@@ -101,10 +111,12 @@ export function buildDocument(input: {
     toc: buildToc(input.chapters),
     metadata: {
       importedAt: input.metadata?.importedAt ?? new Date().toISOString(),
+      importVersion: input.metadata?.importVersion ?? CURRENT_IMPORT_VERSION,
       originLabel: input.originLabel,
       wordCount,
       estimatedMinutes: Math.max(3, Math.round(wordCount / WORDS_PER_MINUTE)),
       extractedWith: input.extractedWith,
+      coverImageUrl: input.metadata?.coverImageUrl,
       note: input.note ?? input.metadata?.note,
       sourcePath: input.metadata?.sourcePath,
       cacheDirectory: input.metadata?.cacheDirectory,
@@ -307,6 +319,32 @@ export function flattenDocument(document: DocumentRecord): FlatBlock[] {
       block,
     })),
   )
+}
+
+export function documentNeedsRepair(document: DocumentRecord): boolean {
+  if ((document.metadata.importVersion ?? 0) < CURRENT_IMPORT_VERSION) {
+    return true
+  }
+
+  const flatBlocks = flattenDocument(document)
+
+  if (flatBlocks.length === 0) {
+    return false
+  }
+
+  const contentBlocks = flatBlocks.filter(({ block }) => block.type !== 'heading')
+
+  if (contentBlocks.length === 0) {
+    return false
+  }
+
+  return contentBlocks.every(({ block }) => {
+    if (block.type !== 'paragraph') {
+      return false
+    }
+
+    return normalizeLine(block.text ?? '') === UNREADABLE_IMPORT_MESSAGE
+  })
 }
 
 export function buildSearchResults(document: DocumentRecord, query: string): SearchResult[] {

@@ -30,10 +30,12 @@ export interface TocItem {
 
 export interface DocumentMetadata {
   importedAt: string
+  importVersion: number
   originLabel: string
   wordCount: number
   estimatedMinutes: number
   extractedWith: string
+  coverImageUrl?: string
   note?: string
   sourcePath?: string
   cacheDirectory?: string
@@ -112,13 +114,29 @@ export interface SearchResult {
   context: string
 }
 
+export type AiProvider = 'google' | 'openai' | 'anthropic'
+
+export interface AppSettings {
+  aiEnabled: boolean
+  aiProvider: AiProvider | null
+  aiModel: string | null
+  aiApiKey: string | null
+}
+
 export interface PaperMagicApi {
   loadState: () => Promise<PersistedState>
   importWithDialog: () => Promise<DocumentRecord[]>
   importPaths: (paths: string[]) => Promise<DocumentRecord[]>
   importUrl: (url: string) => Promise<DocumentRecord>
+  removeDocument: (documentId: string) => Promise<void>
   saveProgress: (progress: ReadingProgress) => Promise<void>
   savePreferences: (preferences: ReaderPreferences) => Promise<ReaderPreferences>
   addBookmark: (bookmark: BookmarkInput) => Promise<Bookmark>
   addHighlight: (highlight: HighlightInput) => Promise<Highlight>
+  removeHighlight: (highlightId: string) => Promise<void>
+  removeBookmark: (bookmarkId: string) => Promise<void>
+  loadSettings: () => Promise<AppSettings>
+  saveSettings: (settings: AppSettings) => Promise<AppSettings>
+  validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
+  getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
 }
