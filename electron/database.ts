@@ -65,6 +65,12 @@ function ensureDocumentCoverImageColumn(connection: Database.Database): void {
   }
 }
 
+function ensureAppSettingsAiApiKeyColumn(connection: Database.Database): void {
+  if (!tableHasColumn(connection, 'app_settings', 'ai_api_key')) {
+    connection.exec('ALTER TABLE app_settings ADD COLUMN ai_api_key TEXT;')
+  }
+}
+
 function backfillDocumentCoverImageReferences(connection: Database.Database): void {
   const rows = connection
     .prepare('SELECT id, metadata_json, cover_image_url FROM documents WHERE cover_image_url IS NULL OR cover_image_url = ?')
@@ -167,12 +173,14 @@ function createTables(connection: Database.Database): void {
       id INTEGER PRIMARY KEY,
       ai_enabled INTEGER NOT NULL DEFAULT 0,
       ai_provider TEXT,
-      ai_model TEXT
+      ai_model TEXT,
+      ai_api_key TEXT
     );
   `)
 
   ensureDocumentCoverImageColumn(connection)
   backfillDocumentCoverImageReferences(connection)
+  ensureAppSettingsAiApiKeyColumn(connection)
 }
 
 export function createDatabaseContext(userDataPath: string): DatabaseContext {
