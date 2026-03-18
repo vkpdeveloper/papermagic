@@ -18,6 +18,7 @@ import {
   saveProgress,
   saveSettings,
   upsertDocument,
+  getRefiningDocumentIds,
 } from './database'
 import { importDocumentFromPath } from './importers'
 import { generateDocumentTitle, validateApiKey, PROVIDER_MODELS } from './ai'
@@ -40,6 +41,7 @@ export interface LibraryStore {
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
   rerunRefinement: (documentId: string) => Promise<void>
+  getRefiningDocumentIds: () => Promise<string[]>
 }
 
 function resolveDocumentCacheDirectory(document: DocumentRecord, libraryRoot: string): string {
@@ -108,8 +110,8 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
         importedDocuments.push(document)
 
         // Queue PDF documents for background content refinement
-        if (document.sourceType === 'pdf' && settings.localAiEnabled !== false) {
-          queueDocumentForRefinement(context, document.id)
+        if (document.sourceType === 'pdf') {
+          queueDocumentForRefinement(context, document.id, settings)
         }
       }
 
@@ -159,8 +161,10 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
     validateApiKey: async (provider, apiKey, modelId) => validateApiKey(provider, apiKey, modelId),
     getProviderModels: async (provider) => PROVIDER_MODELS[provider] ?? [],
     rerunRefinement: async (documentId) => {
-      queueDocumentForRefinement(context, documentId)
+      const settings = loadSettings(context)
+      queueDocumentForRefinement(context, documentId, settings)
     },
+    getRefiningDocumentIds: async () => getRefiningDocumentIds(context),
   }
 }
 

@@ -29,6 +29,7 @@ const api: PaperMagicApi = {
     return () => ipcRenderer.removeListener('refinement:chapter-done', handler)
   },
   rerunRefinement: (documentId) => ipcRenderer.invoke('paper:rerun-refinement', documentId),
+  getRefiningDocumentIds: () => ipcRenderer.invoke('paper:get-refining-document-ids'),
 }
 
 contextBridge.exposeInMainWorld('paperMagic', api)

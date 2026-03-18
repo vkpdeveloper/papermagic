@@ -10,7 +10,7 @@ import {
   getCurrentStatus,
 } from './ollama'
 import { setRefinementEventCallback, startRefinementWorker, stopRefinementWorker } from './refinement'
-import { createDatabaseContext, isOllamaSetupComplete, markOllamaSetupComplete } from './database'
+import { createDatabaseContext, isOllamaSetupComplete, markOllamaSetupComplete, resetStuckProcessingChapters } from './database'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -92,6 +92,7 @@ function registerIpcHandlers() {
   ipcMain.handle('paper:get-provider-models', (_event, provider) => requireStore().getProviderModels(provider))
   ipcMain.handle('paper:get-ollama-status', () => getCurrentStatus())
   ipcMain.handle('paper:rerun-refinement', (_event, documentId: string) => requireStore().rerunRefinement(documentId))
+  ipcMain.handle('paper:get-refining-document-ids', () => requireStore().getRefiningDocumentIds())
 }
 
 app.on('window-all-closed', () => {
@@ -129,8 +130,15 @@ app.whenReady().then(async () => {
 
   const settings = await libraryStore.loadSettings()
 
-  if (!settings.localAiEnabled) {
-    console.log('[ollama] local AI disabled in settings, skipping')
+  // Reset any chapters that were mid-processing when the app last stopped
+  resetStuckProcessingChapters(dbContext)
+
+  // Start refinement worker — it will use whatever provider/model is in settings
+  startRefinementWorker(dbContext, settings)
+
+  // Only spin up Ollama if local AI is the selected refinement provider
+  if (settings.refinementProvider !== 'local') {
+    console.log(`[refinement] provider=${settings.refinementProvider}, model=${settings.refinementModel} — skipping Ollama`)
     return
   }
 
@@ -142,7 +150,6 @@ app.whenReady().then(async () => {
     try {
       await ensureOllama()
       markOllamaSetupComplete(dbContext)
-      startRefinementWorker(dbContext)
     } catch (err) {
       console.error('[ollama] setup failed:', err)
       win?.webContents.send('ollama:progress', {
@@ -155,8 +162,5 @@ app.whenReady().then(async () => {
     console.log('[ollama] starting server on port 11435…')
     const started = await startOllamaServer()
     console.log('[ollama] server started:', started)
-    if (started) {
-      startRefinementWorker(dbContext)
-    }
   }
 })

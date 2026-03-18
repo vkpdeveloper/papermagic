@@ -1,4 +1,10 @@
 @import "tailwindcss";
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/math/dist/*.js";
+@source "../node_modules/@streamdown/cjk/dist/*.js";
+
+@variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-ui: 'Inter', 'Segoe UI', sans-serif;
@@ -61,4 +67,92 @@ input:focus-visible {
 
 #root {
   min-height: 100vh;
+}
+
+/* ── Inline code styling ─────────────────────────────────────────────────── */
+
+.inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: #e2c08d;
+}
+
+/* ── Code block styling ───────────────────────────────────────────────────── */
+
+.code-block {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+.code-block-header {
+  padding: 8px 16px;
+  font-size: 0.78em;
+  font-family: var(--font-ui);
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(248, 248, 243, 0.5);
+}
+
+.code-block-body {
+  padding: 18px 20px;
+  overflow-x: auto;
+}
+
+.code-block-body pre {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  line-height: 1.65;
+}
+
+/* Shiki injects background on the pre/code — override for dark-only rendering */
+.code-block-body .shiki {
+  background: transparent !important;
+}
+
+/* ── Table styling ────────────────────────────────────────────────────────── */
+
+.table-wrapper {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 0.9em;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table-header-cell,
+.table-cell {
+  padding: 10px 16px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.table-header-cell {
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 600;
+  color: rgba(248, 248, 243, 0.9);
+  font-size: 0.82em;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.table-row:last-child .table-cell {
+  border-bottom: none;
+}
+
+.table-row:hover .table-cell {
+  background: rgba(255, 255, 255, 0.03);
 }
