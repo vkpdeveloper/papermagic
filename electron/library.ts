@@ -19,14 +19,14 @@ import {
   saveSettings,
   upsertDocument,
 } from './database'
-import { importDocumentFromPath, importDocumentFromUrl } from './importers'
+import { importDocumentFromPath } from './importers'
 import { generateDocumentTitle, validateApiKey, PROVIDER_MODELS } from './ai'
 import type { AiProvider } from './ai'
+import { queueDocumentForRefinement } from './refinement'
 
 export interface LibraryStore {
   loadState: () => Promise<PersistedState>
   importPaths: (paths: string[]) => Promise<DocumentRecord[]>
-  importUrl: (url: string) => Promise<DocumentRecord>
   removeDocument: (documentId: string) => Promise<void>
   renameDocument: (documentId: string, title: string) => Promise<void>
   saveProgress: (progress: ReadingProgress) => Promise<void>
@@ -39,6 +39,7 @@ export interface LibraryStore {
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
+  rerunRefinement: (documentId: string) => Promise<void>
 }
 
 function resolveDocumentCacheDirectory(document: DocumentRecord, libraryRoot: string): string {
@@ -105,24 +106,14 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
 
         upsertDocument(context, document)
         importedDocuments.push(document)
-      }
 
-      return importedDocuments
-    },
-    importUrl: async (url) => {
-      const existingDocumentId = findExistingDocumentBySource(context, undefined, url)
-
-      if (existingDocumentId) {
-        const state = loadState(context)
-        const existingDocument = state.documents.find((document) => document.id === existingDocumentId)
-        if (existingDocument) {
-          return existingDocument
+        // Queue PDF documents for background content refinement
+        if (document.sourceType === 'pdf' && settings.localAiEnabled !== false) {
+          queueDocumentForRefinement(context, document.id)
         }
       }
 
-      const document = await importDocumentFromUrl(url, context.libraryRoot)
-      upsertDocument(context, document)
-      return document
+      return importedDocuments
     },
     removeDocument: async (documentId) => {
       const state = loadState(context)
@@ -167,6 +158,9 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
     saveSettings: async (settings) => saveSettings(context, settings),
     validateApiKey: async (provider, apiKey, modelId) => validateApiKey(provider, apiKey, modelId),
     getProviderModels: async (provider) => PROVIDER_MODELS[provider] ?? [],
+    rerunRefinement: async (documentId) => {
+      queueDocumentForRefinement(context, documentId)
+    },
   }
 }
 

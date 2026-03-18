@@ -1,4 +1,5 @@
 import { X as XIcon } from 'lucide-react'
+import { Button } from './ui/Button'
 
 interface ImagePreviewState {
   src: string
@@ -18,9 +19,11 @@ export function ImageLightbox({
       className="fixed inset-0 z-[36] grid place-items-center p-7 bg-black/[0.92] max-sm:p-5"
       onClick={onClose}
     >
-      <button
+      <Button
         type="button"
-        className="absolute top-6 right-6 inline-flex items-center gap-2 px-[14px] py-[10px] border border-border-strong bg-black/80 text-text-primary max-sm:top-4 max-sm:right-4"
+        variant="secondary"
+        size="sm"
+        className="absolute top-6 right-6 max-sm:top-4 max-sm:right-4 bg-black/80"
         onClick={(event) => {
           event.stopPropagation()
           onClose()
@@ -28,7 +31,7 @@ export function ImageLightbox({
       >
         <XIcon size={18} strokeWidth={2} aria-hidden="true" />
         <span>Close</span>
-      </button>
+      </Button>
       <figure
         className="m-0 max-w-[min(92vw,1280px)] max-h-[86vh]"
         onClick={(event) => event.stopPropagation()}

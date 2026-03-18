@@ -71,6 +71,24 @@ function ensureAppSettingsAiApiKeyColumn(connection: Database.Database): void {
   }
 }
 
+function ensureLocalAiColumns(connection: Database.Database): void {
+  if (!tableHasColumn(connection, 'app_settings', 'local_ai_enabled')) {
+    connection.exec('ALTER TABLE app_settings ADD COLUMN local_ai_enabled INTEGER NOT NULL DEFAULT 1;')
+  }
+  if (!tableHasColumn(connection, 'app_settings', 'ollama_setup_complete')) {
+    connection.exec('ALTER TABLE app_settings ADD COLUMN ollama_setup_complete INTEGER NOT NULL DEFAULT 0;')
+  }
+}
+
+function ensureChapterRefinementColumns(connection: Database.Database): void {
+  if (!tableHasColumn(connection, 'chapters', 'refined_content_json')) {
+    connection.exec('ALTER TABLE chapters ADD COLUMN refined_content_json TEXT;')
+  }
+  if (!tableHasColumn(connection, 'chapters', 'refinement_status')) {
+    connection.exec("ALTER TABLE chapters ADD COLUMN refinement_status TEXT NOT NULL DEFAULT 'pending';")
+  }
+}
+
 function backfillDocumentCoverImageReferences(connection: Database.Database): void {
   const rows = connection
     .prepare('SELECT id, metadata_json, cover_image_url FROM documents WHERE cover_image_url IS NULL OR cover_image_url = ?')
@@ -181,6 +199,8 @@ function createTables(connection: Database.Database): void {
   ensureDocumentCoverImageColumn(connection)
   backfillDocumentCoverImageReferences(connection)
   ensureAppSettingsAiApiKeyColumn(connection)
+  ensureLocalAiColumns(connection)
+  ensureChapterRefinementColumns(connection)
 }
 
 export function createDatabaseContext(userDataPath: string): DatabaseContext {
@@ -511,6 +531,7 @@ const defaultSettings: AppSettings = {
   aiProvider: null,
   aiModel: null,
   aiApiKey: null,
+  localAiEnabled: true,
 }
 
 export function loadSettings(context: DatabaseContext): AppSettings {
@@ -525,6 +546,7 @@ export function loadSettings(context: DatabaseContext): AppSettings {
     aiProvider: (row.aiProvider as AppSettings['aiProvider']) ?? null,
     aiModel: row.aiModel ?? null,
     aiApiKey: row.aiApiKey ?? null,
+    localAiEnabled: row.localAiEnabled ?? true,
   }
 }
 
@@ -537,6 +559,7 @@ export function saveSettings(context: DatabaseContext, settings: AppSettings): A
       aiProvider: settings.aiProvider ?? null,
       aiModel: settings.aiModel ?? null,
       aiApiKey: settings.aiApiKey ?? null,
+      localAiEnabled: settings.localAiEnabled,
     })
     .onConflictDoUpdate({
       target: settingsTable.id,
@@ -545,9 +568,67 @@ export function saveSettings(context: DatabaseContext, settings: AppSettings): A
         aiProvider: settings.aiProvider ?? null,
         aiModel: settings.aiModel ?? null,
         aiApiKey: settings.aiApiKey ?? null,
+        localAiEnabled: settings.localAiEnabled,
       },
     })
     .run()
 
   return settings
+}
+
+export function isOllamaSetupComplete(context: DatabaseContext): boolean {
+  const row = context.db.select().from(settingsTable).where(eq(settingsTable.id, 1)).get()
+  return row?.ollamaSetupComplete ?? false
+}
+
+export function markOllamaSetupComplete(context: DatabaseContext): void {
+  context.db
+    .insert(settingsTable)
+    .values({ id: 1, aiEnabled: false, localAiEnabled: true, ollamaSetupComplete: true })
+    .onConflictDoUpdate({ target: settingsTable.id, set: { ollamaSetupComplete: true } })
+    .run()
+}
+
+export interface ChapterRefinementRow {
+  id: string
+  documentId: string
+  orderIndex: number
+  contentJson: string
+  refinementStatus: string
+}
+
+export function getPendingRefinementChapters(context: DatabaseContext): ChapterRefinementRow[] {
+  return context.connection
+    .prepare(
+      `SELECT id, document_id as documentId, order_index as orderIndex, content_json as contentJson, refinement_status as refinementStatus
+       FROM chapters WHERE refinement_status = 'pending' ORDER BY order_index ASC`
+    )
+    .all() as ChapterRefinementRow[]
+}
+
+export function saveRefinedChapter(
+  context: DatabaseContext,
+  chapterId: string,
+  refinedContentJson: string,
+  status: 'done' | 'failed',
+): void {
+  context.connection
+    .prepare('UPDATE chapters SET refined_content_json = ?, refinement_status = ? WHERE id = ?')
+    .run(refinedContentJson, status, chapterId)
+}
+
+export function markChapterRefinementStatus(
+  context: DatabaseContext,
+  chapterId: string,
+  status: string,
+): void {
+  context.connection
+    .prepare('UPDATE chapters SET refinement_status = ? WHERE id = ?')
+    .run(status, chapterId)
+}
+
+export function resetDocumentRefinement(context: DatabaseContext, documentId: string): void {
+  context.connection
+    .prepare("UPDATE chapters SET refinement_status = 'pending', refined_content_json = NULL WHERE document_id = ?")
+    .run(documentId)
 }

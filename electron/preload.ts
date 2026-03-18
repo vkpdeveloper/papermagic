@@ -1,11 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { PaperMagicApi } from '../src/types'
+import type { PaperMagicApi, OllamaSetupProgress, ChapterRefinementUpdate } from '../src/types'
 
 const api: PaperMagicApi = {
   loadState: () => ipcRenderer.invoke('paper:load-state'),
   importWithDialog: () => ipcRenderer.invoke('paper:import-with-dialog'),
   importPaths: (paths) => ipcRenderer.invoke('paper:import-paths', paths),
-  importUrl: (url) => ipcRenderer.invoke('paper:import-url', url),
   removeDocument: (documentId) => ipcRenderer.invoke('paper:remove-document', documentId),
   renameDocument: (documentId, title) => ipcRenderer.invoke('paper:rename-document', documentId, title),
   saveProgress: (progress) => ipcRenderer.invoke('paper:save-progress', progress),
@@ -18,6 +17,18 @@ const api: PaperMagicApi = {
   saveSettings: (settings) => ipcRenderer.invoke('paper:save-settings', settings),
   validateApiKey: (provider, apiKey, modelId) => ipcRenderer.invoke('paper:validate-api-key', provider, apiKey, modelId),
   getProviderModels: (provider) => ipcRenderer.invoke('paper:get-provider-models', provider),
+  getOllamaStatus: () => ipcRenderer.invoke('paper:get-ollama-status'),
+  onOllamaProgress: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: OllamaSetupProgress) => callback(progress)
+    ipcRenderer.on('ollama:progress', handler)
+    return () => ipcRenderer.removeListener('ollama:progress', handler)
+  },
+  onChapterRefined: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, update: ChapterRefinementUpdate) => callback(update)
+    ipcRenderer.on('refinement:chapter-done', handler)
+    return () => ipcRenderer.removeListener('refinement:chapter-done', handler)
+  },
+  rerunRefinement: (documentId) => ipcRenderer.invoke('paper:rerun-refinement', documentId),
 }
 
 contextBridge.exposeInMainWorld('paperMagic', api)

@@ -2,6 +2,15 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createLibraryStore } from './library'
+import {
+  ensureOllama,
+  startOllamaServer,
+  stopServer,
+  setOllamaProgressCallback,
+  getCurrentStatus,
+} from './ollama'
+import { setRefinementEventCallback, startRefinementWorker, stopRefinementWorker } from './refinement'
+import { createDatabaseContext, isOllamaSetupComplete, markOllamaSetupComplete } from './database'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -57,7 +66,7 @@ function registerIpcHandlers() {
       filters: [
         {
           name: 'Readable documents',
-          extensions: ['pdf', 'epub', 'html', 'htm', 'md', 'txt'],
+          extensions: ['pdf', 'epub'],
         },
       ],
     })
@@ -69,7 +78,6 @@ function registerIpcHandlers() {
     return requireStore().importPaths(result.filePaths)
   })
   ipcMain.handle('paper:import-paths', (_event, paths: string[]) => requireStore().importPaths(paths))
-  ipcMain.handle('paper:import-url', (_event, url: string) => requireStore().importUrl(url))
   ipcMain.handle('paper:remove-document', (_event, documentId: string) => requireStore().removeDocument(documentId))
   ipcMain.handle('paper:rename-document', (_event, documentId: string, title: string) => requireStore().renameDocument(documentId, title))
   ipcMain.handle('paper:save-progress', (_event, progress) => requireStore().saveProgress(progress))
@@ -82,9 +90,13 @@ function registerIpcHandlers() {
   ipcMain.handle('paper:save-settings', (_event, settings) => requireStore().saveSettings(settings))
   ipcMain.handle('paper:validate-api-key', (_event, provider, apiKey, modelId) => requireStore().validateApiKey(provider, apiKey, modelId))
   ipcMain.handle('paper:get-provider-models', (_event, provider) => requireStore().getProviderModels(provider))
+  ipcMain.handle('paper:get-ollama-status', () => getCurrentStatus())
+  ipcMain.handle('paper:rerun-refinement', (_event, documentId: string) => requireStore().rerunRefinement(documentId))
 }
 
 app.on('window-all-closed', () => {
+  stopRefinementWorker()
+  stopServer()
   if (process.platform !== 'darwin') {
     app.quit()
     win = null
@@ -97,8 +109,54 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(() => {
-  libraryStore = createLibraryStore(app.getPath('userData'))
+app.whenReady().then(async () => {
+  const userDataPath = app.getPath('userData')
+  const dbContext = createDatabaseContext(userDataPath)
+
+  libraryStore = createLibraryStore(userDataPath)
   registerIpcHandlers()
   createWindow()
+
+  // Wire up IPC push events — send to renderer whenever the window is ready
+  setOllamaProgressCallback((progress) => {
+    console.log('[ollama]', progress.status, '—', progress.message, progress.progress !== undefined ? `${progress.progress}%` : '')
+    win?.webContents.send('ollama:progress', progress)
+  })
+
+  setRefinementEventCallback((update) => {
+    win?.webContents.send('refinement:chapter-done', update)
+  })
+
+  const settings = await libraryStore.loadSettings()
+
+  if (!settings.localAiEnabled) {
+    console.log('[ollama] local AI disabled in settings, skipping')
+    return
+  }
+
+  const setupDone = isOllamaSetupComplete(dbContext)
+  console.log('[ollama] setup already complete:', setupDone)
+
+  if (!setupDone) {
+    // First-time onboarding: install + pull + start, with progress pushed to UI
+    try {
+      await ensureOllama()
+      markOllamaSetupComplete(dbContext)
+      startRefinementWorker(dbContext)
+    } catch (err) {
+      console.error('[ollama] setup failed:', err)
+      win?.webContents.send('ollama:progress', {
+        status: 'error',
+        message: String(err instanceof Error ? err.message : err),
+      })
+    }
+  } else {
+    // Subsequent starts: silently start server
+    console.log('[ollama] starting server on port 11435…')
+    const started = await startOllamaServer()
+    console.log('[ollama] server started:', started)
+    if (started) {
+      startRefinementWorker(dbContext)
+    }
+  }
 })

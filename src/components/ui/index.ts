@@ -1,4 +1,5 @@
 export { Button, ButtonInner } from './Button'
+export { Input } from './Input'
 export { Eyebrow } from './Eyebrow'
 export { PanelCard } from './PanelCard'
 export { ProgressBar } from './ProgressBar'

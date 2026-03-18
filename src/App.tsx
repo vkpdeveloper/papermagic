@@ -17,7 +17,6 @@ import {
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   FileText as FileTextIcon,
-  Globe as GlobeIcon,
   Highlighter as HighlighterIcon,
   List as ListIcon,
   NotebookPen as NotebookPenIcon,
@@ -34,6 +33,7 @@ import { defaultPreferences } from './storage'
 import type {
   AppMode,
   Bookmark,
+  ChapterRefinementUpdate,
   DocumentRecord,
   Highlight,
   PersistedState,
@@ -49,6 +49,9 @@ import { ImageLightbox } from './components/ImageLightbox'
 import { SelectionPopover } from './components/SelectionPopover'
 import { ReaderSearchBar } from './components/ReaderSearchBar'
 import { SettingsPage } from './components/SettingsPage'
+import { OllamaOnboarding } from './components/OllamaOnboarding'
+import { Button } from './components/ui/Button'
+import { Input } from './components/ui/Input'
 import { Tooltip, TooltipProvider } from './components/ui/Tooltip'
 import { ContextMenu } from './components/ui/ContextMenu'
 
@@ -82,19 +85,12 @@ interface TocGroup {
   items: TocItem[]
 }
 
-type PageEntry =
-  | {
-      id: string
-      kind: 'chapter'
-      chapterId: string
-      title: string
-    }
-  | {
-      id: string
-      kind: 'block'
-      chapterId: string
-      block: ReaderBlock
-    }
+type PageEntry = {
+  id: string
+  kind: 'block'
+  chapterId: string
+  block: ReaderBlock
+}
 
 type DroppedFile = File & {
   path?: string
@@ -217,7 +213,7 @@ function SourceIcon(props: {
   strokeWidth?: number
 }) {
   const { sourceType, size = 16, strokeWidth = 1.8 } = props
-  const Icon = sourceType === 'epub' ? BookOpenIcon : sourceType === 'pdf' ? FileTextIcon : GlobeIcon
+  const Icon = sourceType === 'epub' ? BookOpenIcon : FileTextIcon
   return <Icon size={size} strokeWidth={strokeWidth} aria-hidden="true" />
 }
 
@@ -236,26 +232,16 @@ function buildPageEntries(document: DocumentRecord | null): PageEntry[] {
     return []
   }
 
-  return document.chapters.flatMap((chapter) => [
-    ...(!isUtilityHeading(chapter.title)
-      ? [
-          {
-            id: `${chapter.id}-title`,
-            kind: 'chapter' as const,
-            chapterId: chapter.id,
-            title: chapter.title,
-          },
-        ]
-      : []),
-    ...chapter.content
+  return document.chapters.flatMap((chapter) =>
+    chapter.content
       .filter((block) => !(block.type === 'heading' && isUtilityHeading(block.text ?? '')))
       .map((block) => ({
         id: block.id,
         kind: 'block' as const,
         chapterId: chapter.id,
         block,
-      })),
-  ])
+      }))
+  )
 }
 
 function buildCurrentLocation(readerElement: HTMLDivElement | null): { chapterId: string; blockId: string } | null {
@@ -445,7 +431,7 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
         >
           <button
             type="button"
-            className="block w-full p-0 border-0 bg-transparent cursor-zoom-in"
+            className="block w-full p-0 border-0 bg-transparent cursor-zoom-in outline-none"
             onClick={() =>
               block.src
                 ? onPreviewImage?.({
@@ -492,16 +478,6 @@ const PageEntryView = memo(function PageEntryView(props: {
 }) {
   const { entry, documentId, highlights, searchQuery, activeSearchBlockId, onPreviewImage } = props
 
-  if (entry.kind === 'chapter') {
-    return (
-      <div className="block" data-page-entry-id={entry.id}>
-        <h2 className="m-0 mb-[18px] text-[0.76rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
-          {entry.title}
-        </h2>
-      </div>
-    )
-  }
-
   return (
     <div className="block" data-page-entry-id={entry.id}>
       <ReaderBlockView
@@ -524,7 +500,6 @@ function App() {
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null)
   const [activePanel, setActivePanel] = useState<ReaderPanel>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
-  const [urlInput, setUrlInput] = useState('')
   const [isImporting, setIsImporting] = useState(false)
   const [deletingDocumentIds, setDeletingDocumentIds] = useState<string[]>([])
   const [isDragging, setIsDragging] = useState(false)
@@ -543,6 +518,7 @@ function App() {
   const [readingModeOverride, setReadingModeOverride] = useState<ReadingMode | null>(null)
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [showOnboarding, setShowOnboarding] = useState(false)
   const readerRef = useRef<HTMLDivElement | null>(null)
   const pageViewportRef = useRef<HTMLDivElement | null>(null)
   const pageMeasureRef = useRef<HTMLDivElement | null>(null)
@@ -610,6 +586,55 @@ function App() {
   useEffect(() => {
     setExpandedTocChapters([])
   }, [activeDocumentId])
+
+  // Show onboarding if Ollama setup hasn't run yet
+  useEffect(() => {
+    void window.paperMagic.getOllamaStatus().then((status) => {
+      // If status is checking/installing/pulling, onboarding is in progress
+      if (['checking', 'installing', 'pulling', 'starting'].includes(status.status)) {
+        setShowOnboarding(true)
+      }
+    })
+
+    // Also show onboarding if we receive a non-ready/non-idle progress event right after boot
+    const unsub = window.paperMagic.onOllamaProgress((progress) => {
+      if (['checking', 'installing', 'pulling', 'starting'].includes(progress.status)) {
+        setShowOnboarding(true)
+      }
+    })
+    return unsub
+  }, [])
+
+  // Track which chapters have been refined mid-session so page-reset effect
+  // can skip resetting position when only content changed (not document switch).
+  const refinedChapterIdsRef = useRef<Set<string>>(new Set())
+
+  // Listen for chapter refinement updates and swap content in state
+  useEffect(() => {
+    const unsub = window.paperMagic.onChapterRefined((update: ChapterRefinementUpdate) => {
+      refinedChapterIdsRef.current.add(update.chapterId)
+      // Use startTransition so the content swap is low-priority and doesn't
+      // interrupt the user's current interaction/scroll.
+      startTransition(() => {
+        setPersistedState((current) => {
+          if (!current) return current
+          return {
+            ...current,
+            documents: current.documents.map((doc) => {
+              if (doc.id !== update.documentId) return doc
+              return {
+                ...doc,
+                chapters: doc.chapters.map((ch) =>
+                  ch.id === update.chapterId ? { ...ch, content: update.refinedContent } : ch
+                ),
+              }
+            }),
+          }
+        })
+      })
+    })
+    return unsub
+  }, [])
 
   const commitProgress = useCallback((progress: ReadingProgress) => {
     startTransition(() => {
@@ -802,10 +827,22 @@ function App() {
   )
 
 
+  const prevDocumentIdRef = useRef<string | null>(null)
+
   useEffect(() => {
     if (!activeDocument) {
       return
     }
+
+    // If the document identity didn't change (only chapter content was refined),
+    // skip the position reset so reading position is preserved mid-refinement.
+    if (prevDocumentIdRef.current === activeDocument.id && refinedChapterIdsRef.current.size > 0) {
+      refinedChapterIdsRef.current.clear()
+      return
+    }
+
+    prevDocumentIdRef.current = activeDocument.id
+    refinedChapterIdsRef.current.clear()
 
     if (activeReadingMode === 'page') {
       setPageIndex(activeProgress?.pageIndex ?? 0)
@@ -1040,24 +1077,6 @@ function App() {
       )
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'The dropped files could not be imported.')
-    } finally {
-      setIsImporting(false)
-    }
-  }
-
-  const importUrlValue = async (url: string) => {
-    if (!url.trim()) {
-      return
-    }
-
-    setIsImporting(true)
-
-    try {
-      const document = await window.paperMagic.importUrl(url.trim())
-      mergeImportedDocuments([document], `Saved ${document.title} to the local library.`)
-      setUrlInput('')
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'The URL could not be imported in this environment.')
     } finally {
       setIsImporting(false)
     }
@@ -1727,7 +1746,7 @@ function App() {
   const tocGroups = useMemo(() => buildTocGroups(activeDocument), [activeDocument])
 
   // Shared list-item classes for TOC items, annotation items
-  const listItemBase = 'w-full px-[13px] py-3 text-left bg-white/[0.02] border border-border-subtle text-text-primary transition-[border-color,background,transform] duration-[160ms] cursor-pointer border-0 font-[inherit]'
+  const listItemBase = 'w-full px-[13px] py-3 text-left bg-white/[0.02] border border-border-subtle text-text-primary transition-[border-color,background,transform] duration-[160ms] cursor-pointer border-0 font-[inherit] outline-none'
   const listItemHover = 'hover:border-border-strong hover:bg-white/[0.04]'
   const listItemActive = 'border-border-strong! bg-white/[0.06]'
 
@@ -1798,12 +1817,6 @@ function App() {
 
         if (event.dataTransfer.files.length > 0) {
           void handleFilesSelected(event.dataTransfer.files)
-          return
-        }
-
-        const droppedUrl = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain')
-        if (droppedUrl) {
-          void importUrlValue(droppedUrl)
         }
       }}
     >
@@ -1819,48 +1832,30 @@ function App() {
                 Library
               </h1>
             </div>
-            <button
+            <Button
+              variant="icon"
+              size="md"
+              className="border border-border-subtle shrink-0"
               type="button"
               onClick={() => setIsSettingsOpen(true)}
-              className="w-10 h-10 inline-flex items-center justify-center bg-transparent border border-border-subtle text-text-secondary hover:border-border-strong hover:text-text-primary transition-colors duration-150 cursor-pointer shrink-0"
               aria-label="Open settings"
             >
               <SettingsIcon size={16} strokeWidth={1.9} />
-            </button>
+            </Button>
           </section>
 
           {/* Import panel */}
           <section className="border border-border-subtle bg-[#000] p-6 mb-6 max-sm:p-[22px]">
             <div className="grid gap-[14px]">
               <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 items-stretch max-sm:grid-cols-1">
-                <button
-                  className="min-h-14 px-[18px] bg-text-primary text-[#000] font-bold transition-[border-color,background,color] duration-[160ms] cursor-pointer border-0 font-[inherit] disabled:opacity-60"
+                <Button
+                  variant="primary"
                   onClick={() => void handleImportDialog()}
                   disabled={isImporting}
                 >
-                  <span className="inline-flex items-center justify-center gap-2">
-                    <UploadIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                    <span>{isImporting ? 'Importing…' : 'Import files'}</span>
-                  </span>
-                </button>
-                <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 max-sm:grid-cols-1">
-                  <input
-                    className="w-full min-h-14 px-4 border border-border-strong bg-[#040404] text-text-primary font-[inherit]"
-                    value={urlInput}
-                    onChange={(event) => setUrlInput(event.target.value)}
-                    placeholder="Paste a URL to save a readable article"
-                  />
-                  <button
-                    className="min-h-14 px-[18px] bg-[#000] text-text-primary border border-border-strong transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit] disabled:opacity-60"
-                    onClick={() => void importUrlValue(urlInput)}
-                    disabled={isImporting}
-                  >
-                    <span className="inline-flex items-center justify-center gap-2">
-                      <GlobeIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                      <span>{isImporting ? 'Importing…' : 'Save URL'}</span>
-                    </span>
-                  </button>
-                </div>
+                  <UploadIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                  <span>{isImporting ? 'Importing…' : 'Import files'}</span>
+                </Button>
               </div>
             </div>
           </section>
@@ -1872,7 +1867,7 @@ function App() {
                 <h2 className="m-0 text-base font-display font-semibold">Empty library</h2>
                 <span className="text-text-muted text-[0.95rem]">Start with one import</span>
               </div>
-              <p className="max-w-[44ch] text-text-muted">Drop a PDF or EPUB, or paste a URL.</p>
+              <p className="max-w-[44ch] text-text-muted">Drop a PDF or EPUB.</p>
             </section>
           ) : null}
 
@@ -1884,16 +1879,15 @@ function App() {
                   <h2 className="m-0 text-base font-display font-semibold">Library</h2>
                   <span className="text-text-muted text-[0.95rem]">{filteredLibraryDocuments.length} items</span>
                 </div>
-                <label className="w-[min(100%,320px)] flex items-center gap-[10px] min-h-12 px-[14px] border border-border-strong bg-[#040404] text-text-muted max-sm:w-full">
-                  <SearchIcon size={15} strokeWidth={1.9} aria-hidden="true" />
-                  <input
-                    ref={librarySearchRef}
-                    className="w-full min-w-0 p-0 border-0 bg-transparent text-text-primary font-[inherit] focus:outline-none"
-                    value={librarySearchQuery}
-                    onChange={(event) => setLibrarySearchQuery(event.target.value)}
-                    placeholder="Search title, author, or source"
-                  />
-                </label>
+                <Input
+                  ref={librarySearchRef}
+                  size="md"
+                  prefix={<SearchIcon size={15} strokeWidth={1.9} aria-hidden="true" />}
+                  wrapperClassName="w-[min(100%,320px)] max-sm:w-full"
+                  value={librarySearchQuery}
+                  onChange={(event) => setLibrarySearchQuery(event.target.value)}
+                  placeholder="Search title, author, or source"
+                />
               </div>
               {filteredLibraryDocuments.length > 0 ? (
                 <div className="grid grid-cols-[repeat(auto-fill,240px)] justify-start gap-4 max-sm:grid-cols-2">
@@ -2003,24 +1997,24 @@ function App() {
               {/* Sidebar top */}
               <div className="px-[18px] pt-[18px] pb-[18px] border-b border-border-subtle">
                 <div className="mb-[18px] flex items-center justify-between gap-[10px]">
-                  <button
-                    className="min-h-14 px-[18px] bg-transparent text-text-secondary border border-border-subtle transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                  <Button
+                    variant="ghost"
                     onClick={exitReader}
                   >
-                    <span className="inline-flex items-center justify-center gap-2">
-                      <ChevronLeftIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                      <span>Library</span>
-                    </span>
-                  </button>
+                    <ChevronLeftIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                    <span>Library</span>
+                  </Button>
                   <div className="inline-flex items-center gap-[10px]">
                     <Tooltip content="Collapse sidebar" shortcut="Mod+B" side="bottom">
-                      <button
-                        className="w-[42px] h-[42px] min-h-0 p-0 inline-flex items-center justify-center bg-transparent text-text-secondary border border-border-subtle transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                      <Button
+                        variant="icon"
+                        size="md"
+                        className="border border-border-subtle"
                         onClick={() => setIsSidebarOpen(false)}
                         aria-label="Collapse sidebar"
                       >
                         <PanelLeftCloseIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                      </button>
+                      </Button>
                     </Tooltip>
                   </div>
                 </div>
@@ -2049,7 +2043,7 @@ function App() {
                     return (
                       <Tooltip key={tab.id} content={tab.label} shortcut={tab.shortcut} side="bottom">
                         <button
-                          className={`inline-flex items-center justify-center gap-2 min-w-0 min-h-[52px] px-3 py-[11px] border-0 border-r border-r-border-subtle last:border-r-0 bg-transparent text-text-muted cursor-pointer transition-[border-color,background,color] duration-[160ms] font-[inherit] hover:bg-white/[0.04] hover:text-text-primary ${visibleReaderPanel === tab.id ? 'text-text-primary bg-[#070707]' : ''}`}
+                          className={`inline-flex items-center justify-center gap-2 min-w-0 min-h-[52px] px-3 py-[11px] border-0 border-r border-r-border-subtle last:border-r-0 bg-transparent text-text-muted cursor-pointer transition-[border-color,background,color] duration-[160ms] font-[inherit] outline-none hover:bg-white/[0.04] hover:text-text-primary ${visibleReaderPanel === tab.id ? 'text-text-primary bg-[#070707]' : ''}`}
                           onClick={() => {
                             setActivePanel(tab.id)
                             setIsSidebarOpen(true)
@@ -2081,7 +2075,7 @@ function App() {
                   >
                     <Tooltip content="Page mode" shortcut="Mod+Shift+M" side="bottom">
                       <button
-                        className={`inline-flex items-center justify-center w-10 h-10 border-0 cursor-pointer font-[inherit] transition-[background,color] duration-[160ms] ${activeReadingMode === 'page' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
+                        className={`inline-flex items-center justify-center w-10 h-10 border-0 cursor-pointer font-[inherit] outline-none transition-[background,color] duration-[160ms] ${activeReadingMode === 'page' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
                         onClick={() => setReadingMode('page')}
                         aria-label="Use paged reading mode"
                       >
@@ -2090,7 +2084,7 @@ function App() {
                     </Tooltip>
                     <Tooltip content="Scroll mode" shortcut="Mod+Shift+M" side="bottom">
                       <button
-                        className={`inline-flex items-center justify-center w-10 h-10 border-0 border-l border-border-subtle cursor-pointer font-[inherit] transition-[background,color] duration-[160ms] ${activeReadingMode === 'scroll' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
+                        className={`inline-flex items-center justify-center w-10 h-10 border-0 border-l border-border-subtle cursor-pointer font-[inherit] outline-none transition-[background,color] duration-[160ms] ${activeReadingMode === 'scroll' ? 'bg-text-primary text-[#000]' : 'bg-transparent text-text-muted'}`}
                         onClick={() => setReadingMode('scroll')}
                         aria-label="Use scroll reading mode"
                       >
@@ -2124,7 +2118,7 @@ function App() {
                         return (
                           <section key={group.chapterId} className="grid gap-2">
                             <button
-                              className={`w-full px-[13px] py-3 flex items-center gap-[10px] border border-border-subtle bg-white/[0.02] text-text-primary text-left transition-[border-color,background] duration-[160ms] cursor-pointer font-[inherit] hover:border-border-strong hover:bg-white/[0.04] ${isActiveChapter || isExpanded ? 'border-border-strong bg-white/[0.06]' : ''}`}
+                              className={`w-full px-[13px] py-3 flex items-center gap-[10px] border border-border-subtle bg-white/[0.02] text-text-primary text-left transition-[border-color,background] duration-[160ms] cursor-pointer font-[inherit] outline-none hover:border-border-strong hover:bg-white/[0.04] ${isActiveChapter || isExpanded ? 'border-border-strong bg-white/[0.06]' : ''}`}
                               aria-expanded={isExpanded}
                               onClick={() => {
                                 if (group.items.length === 0) {
@@ -2185,13 +2179,14 @@ function App() {
                           Bookmarks and highlights
                         </h2>
                       </div>
-                      <button
-                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-border-subtle bg-transparent text-text-secondary cursor-pointer font-[inherit]"
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => setActivePanel('toc')}
                       >
                         <XIcon size={15} strokeWidth={1.9} aria-hidden="true" />
                         Done
-                      </button>
+                      </Button>
                     </div>
                     {/* Bookmarks */}
                     <div className="mt-4">
@@ -2299,20 +2294,22 @@ function App() {
           {/* Reader surface */}
           <div
             ref={readerRef}
-            className={`min-h-screen overflow-y-auto relative ${activeReadingMode === 'page' ? 'overflow-hidden p-0' : 'py-6 pb-[88px] max-sm:pt-5'}`}
+            className={`overflow-y-auto relative ${activeReadingMode === 'page' ? 'h-screen overflow-hidden p-0' : 'min-h-screen py-6 pb-[88px] max-sm:pt-5'}`}
             onScroll={handleReaderScroll}
             onMouseUp={handleSelectionChange}
             onKeyUp={handleSelectionChange}
           >
             {!isSidebarOpen ? (
               <Tooltip content="Open sidebar" shortcut="Mod+B" side="right">
-                <button
-                  className="fixed top-[22px] left-[22px] z-20 w-[42px] h-[42px] min-h-0 p-0 inline-flex items-center justify-center bg-black/[0.82] backdrop-blur-[12px] border border-border-subtle text-text-secondary cursor-pointer font-[inherit] max-sm:top-4 max-sm:left-4"
+                <Button
+                  variant="icon"
+                  size="md"
+                  className="fixed top-[22px] left-[22px] z-20 bg-black/[0.82] backdrop-blur-[12px] border border-border-subtle max-sm:top-4 max-sm:left-4"
                   onClick={() => setIsSidebarOpen(true)}
                   aria-label="Open sidebar"
                 >
                   <PanelLeftOpenIcon size={17} strokeWidth={1.9} aria-hidden="true" />
-                </button>
+                </Button>
               </Tooltip>
             ) : null}
             <div
@@ -2361,22 +2358,28 @@ function App() {
                           ))}
                         </article>
                       </div>
-                      <div className={`flex justify-center items-center gap-3 text-text-muted font-ui text-[0.9rem] tabular-nums max-sm:flex-col max-sm:items-stretch ${pages.length === 0 ? 'invisible' : ''}`}>
-                        <button
-                          className="inline-flex items-center justify-center w-10 h-10 min-h-0 p-0 bg-[#000] text-text-primary border border-border-strong transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                      <div className={`mt-auto flex justify-center items-center gap-3 text-text-muted font-ui text-[0.9rem] tabular-nums max-sm:flex-col max-sm:items-stretch ${pages.length === 0 ? 'invisible' : ''}`}>
+                        <Button
+                          variant="secondary"
+                          size="md"
+                          className="w-10 px-0"
                           onClick={() => changePage(-1)}
+                          aria-label="Previous page"
                         >
                           <ChevronLeftIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                        </button>
+                        </Button>
                         <span className="min-w-[12ch] text-center">
                           Page {Math.min(pageIndex + 1, Math.max(1, pageCount))} of {Math.max(1, pageCount)}
                         </span>
-                        <button
-                          className="inline-flex items-center justify-center w-10 h-10 min-h-0 p-0 bg-[#000] text-text-primary border border-border-strong transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
+                        <Button
+                          variant="secondary"
+                          size="md"
+                          className="w-10 px-0"
                           onClick={() => changePage(1)}
+                          aria-label="Next page"
                         >
                           <ChevronRightIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                        </button>
+                        </Button>
                       </div>
                       <div
                         ref={pageMeasureRef}
@@ -2425,29 +2428,39 @@ function App() {
               name="title"
               type="text"
               defaultValue={renameDialog.value}
-              className="w-full min-h-12 px-4 border border-border-strong bg-[#040404] text-text-primary font-[inherit]"
+              className="w-full min-h-12 px-4 border border-border-strong bg-[#040404] text-text-primary font-[inherit] outline-none"
               placeholder="Document title"
             />
             <div className="flex justify-end gap-3">
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="md"
                 onClick={() => setRenameDialog(null)}
-                className="min-h-10 px-4 bg-transparent text-text-primary border border-border-subtle transition-[border-color,background,color] duration-[160ms] cursor-pointer font-[inherit]"
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
                 type="submit"
-                className="min-h-10 px-4 bg-text-primary text-[#000] font-bold transition-[border-color,background,color] duration-[160ms] cursor-pointer border-0 font-[inherit]"
+                variant="primary"
+                size="md"
               >
                 Save
-              </button>
+              </Button>
             </div>
           </form>
         </Dialog>
       ) : null}
 
-      <SettingsPage open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      <SettingsPage
+        open={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        currentDocumentId={mode === 'reader' ? activeDocumentId : null}
+      />
+
+      {showOnboarding && (
+        <OllamaOnboarding onComplete={() => setShowOnboarding(false)} />
+      )}
     </div>
     </TooltipProvider>
   )

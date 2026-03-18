@@ -126,7 +126,7 @@ export function buildDocument(input: {
   }
 }
 
-export function splitBlocksIntoChapters(defaultTitle: string, blocks: ReaderBlock[]): Chapter[] {
+export function splitBlocksIntoChapters(defaultTitle: string, blocks: ReaderBlock[], maxLevel = 2): Chapter[] {
   const chapters: Chapter[] = []
   let chapterIndex = 1
   let currentChapter: Chapter = {
@@ -144,7 +144,7 @@ export function splitBlocksIntoChapters(defaultTitle: string, blocks: ReaderBloc
   }
 
   blocks.forEach((block) => {
-    const isTopHeading = block.type === 'heading' && (block.level ?? 2) <= 2
+    const isTopHeading = block.type === 'heading' && (block.level ?? 2) <= maxLevel
 
     if (isTopHeading && currentChapter.content.length > 0) {
       pushCurrentChapter()

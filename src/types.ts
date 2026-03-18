@@ -1,5 +1,5 @@
 export type AppMode = 'library' | 'reader'
-export type DocumentSource = 'pdf' | 'epub' | 'web'
+export type DocumentSource = 'pdf' | 'epub'
 export type ReadingMode = 'scroll' | 'page'
 export type ReaderBlockType = 'heading' | 'paragraph' | 'quote' | 'list' | 'code' | 'image'
 
@@ -116,18 +116,35 @@ export interface SearchResult {
 
 export type AiProvider = 'google' | 'openai' | 'anthropic'
 
+export type OllamaStatus = 'idle' | 'checking' | 'installing' | 'pulling' | 'starting' | 'ready' | 'error'
+
+export interface OllamaSetupProgress {
+  status: OllamaStatus
+  message: string
+  progress?: number // 0-100 for pull progress
+}
+
+export type RefinementStatus = 'pending' | 'processing' | 'done' | 'failed'
+
+export interface ChapterRefinementUpdate {
+  documentId: string
+  chapterId: string
+  refinedContent: ReaderBlock[]
+  status: RefinementStatus
+}
+
 export interface AppSettings {
   aiEnabled: boolean
   aiProvider: AiProvider | null
   aiModel: string | null
   aiApiKey: string | null
+  localAiEnabled: boolean
 }
 
 export interface PaperMagicApi {
   loadState: () => Promise<PersistedState>
   importWithDialog: () => Promise<DocumentRecord[]>
   importPaths: (paths: string[]) => Promise<DocumentRecord[]>
-  importUrl: (url: string) => Promise<DocumentRecord>
   removeDocument: (documentId: string) => Promise<void>
   renameDocument: (documentId: string, title: string) => Promise<void>
   saveProgress: (progress: ReadingProgress) => Promise<void>
@@ -140,4 +157,8 @@ export interface PaperMagicApi {
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
+  getOllamaStatus: () => Promise<OllamaSetupProgress>
+  onOllamaProgress: (callback: (progress: OllamaSetupProgress) => void) => () => void
+  onChapterRefined: (callback: (update: ChapterRefinementUpdate) => void) => () => void
+  rerunRefinement: (documentId: string) => Promise<void>
 }

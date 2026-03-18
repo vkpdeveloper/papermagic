@@ -1,22 +1,15 @@
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import path from 'node:path'
-import zlib from 'node:zlib'
 import { pathToFileURL } from 'node:url'
-import { fileURLToPath } from 'node:url'
-import { spawn } from 'node:child_process'
-import { session } from 'electron'
 import JSZip from 'jszip'
 import { parseHTML } from 'linkedom'
 import { XMLParser } from 'fast-xml-parser'
-import { createCanvas } from '@napi-rs/canvas'
-import { ImageKind, OPS, getDocument as getPdfDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
-import type { RefProxy } from 'pdfjs-dist/types/src/display/api'
+import mupdf from 'mupdf'
 import {
   UNREADABLE_IMPORT_MESSAGE,
   buildDocument,
   createId,
-  extractTitleFromMarkdown,
-  markdownToBlocks,
   splitBlocksIntoChapters,
 } from '../src/content'
 import type { Chapter, DocumentRecord, ReaderBlock } from '../src/types'
@@ -46,66 +39,6 @@ export function friendlyFilenameTitle(filename: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
-function buildBrowserLikeHeaders(targetUrl: string, headers?: HeadersInit): Headers {
-  const nextHeaders = new Headers(headers)
-
-  if (!nextHeaders.has('accept')) {
-    nextHeaders.set(
-      'accept',
-      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    )
-  }
-
-  if (!nextHeaders.has('accept-language')) {
-    nextHeaders.set('accept-language', 'en-US,en;q=0.9')
-  }
-
-  if (!nextHeaders.has('cache-control')) {
-    nextHeaders.set('cache-control', 'no-cache')
-  }
-
-  if (!nextHeaders.has('pragma')) {
-    nextHeaders.set('pragma', 'no-cache')
-  }
-
-  if (!nextHeaders.has('upgrade-insecure-requests')) {
-    nextHeaders.set('upgrade-insecure-requests', '1')
-  }
-
-  if (!nextHeaders.has('user-agent')) {
-    const chromeVersion = process.versions.chrome ?? '124.0.0.0'
-    nextHeaders.set(
-      'user-agent',
-      `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`,
-    )
-  }
-
-  if (!nextHeaders.has('referer')) {
-    try {
-      nextHeaders.set('referer', new URL(targetUrl).origin)
-    } catch {
-      // Ignore invalid URLs and let the request proceed without a referer.
-    }
-  }
-
-  return nextHeaders
-}
-
-async function fetchRemoteResource(input: string | URL, init?: RequestInit): Promise<Response> {
-  const targetUrl = input instanceof URL ? input.toString() : input
-  const requestInit: RequestInit = {
-    ...init,
-    redirect: init?.redirect ?? 'follow',
-    headers: buildBrowserLikeHeaders(targetUrl, init?.headers),
-  }
-
-  try {
-    return await session.defaultSession.fetch(targetUrl, requestInit)
-  } catch {
-    return fetch(targetUrl, requestInit)
-  }
-}
-
 function ensureReadableBlocks(blocks: ReaderBlock[], fallbackTitle: string): ReaderBlock[] {
   if (blocks.length > 0) {
     return blocks
@@ -126,65 +59,12 @@ function ensureReadableBlocks(blocks: ReaderBlock[], fallbackTitle: string): Rea
   ]
 }
 
-function extensionFromContentType(contentType: string | null): string {
-  if (!contentType) {
-    return '.img'
-  }
-
-  if (contentType.includes('svg')) {
-    return '.svg'
-  }
-
-  if (contentType.includes('png')) {
-    return '.png'
-  }
-
-  if (contentType.includes('jpeg') || contentType.includes('jpg')) {
-    return '.jpg'
-  }
-
-  if (contentType.includes('webp')) {
-    return '.webp'
-  }
-
-  if (contentType.includes('gif')) {
-    return '.gif'
-  }
-
-  return '.img'
-}
-
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-const CRC32_TABLE = (() => {
-  const table = new Uint32Array(256)
-
-  for (let index = 0; index < 256; index += 1) {
-    let value = index
-
-    for (let bit = 0; bit < 8; bit += 1) {
-      value = (value & 1) === 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
-    }
-
-    table[index] = value >>> 0
-  }
-
-  return table
-})()
-
 function delay(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'asset'
-}
-
-function resolveAppRoot(): string {
-  return process.env.APP_ROOT ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
-}
-
-function resolveSummarizeCliPath(): string {
-  return path.join(resolveAppRoot(), 'node_modules', '@steipete', 'summarize', 'dist', 'cli.js')
 }
 
 async function createCacheDirectory(libraryRoot: string, documentId: string): Promise<string> {
@@ -198,113 +78,6 @@ function resolvePosixPath(basePath: string, target: string): string {
   return path.posix.normalize(path.posix.join(path.posix.dirname(basePath), pathname))
 }
 
-function createPngChunk(type: string, data: Buffer): Buffer {
-  const typeBuffer = Buffer.from(type, 'ascii')
-  const lengthBuffer = Buffer.alloc(4)
-  lengthBuffer.writeUInt32BE(data.length, 0)
-
-  const crcInput = Buffer.concat([typeBuffer, data])
-  let crc = 0xffffffff
-
-  for (const byte of crcInput) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8)
-  }
-
-  const crcBuffer = Buffer.alloc(4)
-  crcBuffer.writeUInt32BE((crc ^ 0xffffffff) >>> 0, 0)
-
-  return Buffer.concat([lengthBuffer, typeBuffer, data, crcBuffer])
-}
-
-function encodeRgbaPng(width: number, height: number, rgba: Uint8Array): Buffer {
-  const stride = width * 4
-  const raw = Buffer.alloc((stride + 1) * height)
-
-  for (let rowIndex = 0; rowIndex < height; rowIndex += 1) {
-    const rowOffset = rowIndex * (stride + 1)
-    raw[rowOffset] = 0
-    Buffer.from(rgba.subarray(rowIndex * stride, (rowIndex + 1) * stride)).copy(raw, rowOffset + 1)
-  }
-
-  const header = Buffer.alloc(13)
-  header.writeUInt32BE(width, 0)
-  header.writeUInt32BE(height, 4)
-  header[8] = 8
-  header[9] = 6
-  header[10] = 0
-  header[11] = 0
-  header[12] = 0
-
-  return Buffer.concat([
-    PNG_SIGNATURE,
-    createPngChunk('IHDR', header),
-    createPngChunk('IDAT', zlib.deflateSync(raw)),
-    createPngChunk('IEND', Buffer.alloc(0)),
-  ])
-}
-
-function toRgbaImageData(image: {
-  width: number
-  height: number
-  kind: number
-  data: Uint8Array
-}): Uint8Array | null {
-  if (image.kind === ImageKind.RGBA_32BPP) {
-    return new Uint8Array(image.data)
-  }
-
-  if (image.kind === ImageKind.RGB_24BPP) {
-    const rgba = new Uint8Array(image.width * image.height * 4)
-
-    for (let sourceIndex = 0, targetIndex = 0; sourceIndex < image.data.length; sourceIndex += 3, targetIndex += 4) {
-      rgba[targetIndex] = image.data[sourceIndex]
-      rgba[targetIndex + 1] = image.data[sourceIndex + 1]
-      rgba[targetIndex + 2] = image.data[sourceIndex + 2]
-      rgba[targetIndex + 3] = 255
-    }
-
-    return rgba
-  }
-
-  if (image.kind === ImageKind.GRAYSCALE_1BPP) {
-    const rgba = new Uint8Array(image.width * image.height * 4)
-
-    for (let pixelIndex = 0; pixelIndex < image.width * image.height; pixelIndex += 1) {
-      const sourceByte = image.data[pixelIndex >> 3]
-      const mask = 0x80 >> (pixelIndex & 7)
-      const value = (sourceByte & mask) === mask ? 255 : 0
-      const targetIndex = pixelIndex * 4
-      rgba[targetIndex] = value
-      rgba[targetIndex + 1] = value
-      rgba[targetIndex + 2] = value
-      rgba[targetIndex + 3] = 255
-    }
-
-    return rgba
-  }
-
-  return null
-}
-
-function isPdfBinaryImage(value: unknown): value is {
-  width: number
-  height: number
-  kind: number
-  data: Uint8Array
-} {
-  if (!value || typeof value !== 'object') {
-    return false
-  }
-
-  const candidate = value as Record<string, unknown>
-  return (
-    typeof candidate.width === 'number' &&
-    typeof candidate.height === 'number' &&
-    typeof candidate.kind === 'number' &&
-    candidate.data instanceof Uint8Array
-  )
-}
-
 async function persistCoverBuffer(
   cacheDirectory: string,
   fileName: string,
@@ -313,123 +86,6 @@ async function persistCoverBuffer(
   const targetPath = path.join(cacheDirectory, fileName)
   await fs.writeFile(targetPath, imageBuffer)
   return pathToFileURL(targetPath).toString()
-}
-
-async function cacheImageAsset(
-  source: string,
-  origin: string,
-  cacheDirectory: string,
-  targetBaseName = 'cover',
-): Promise<string | undefined> {
-  let resolvedUrl: URL
-
-  try {
-    resolvedUrl = new URL(source, origin)
-  } catch {
-    return undefined
-  }
-
-  if (resolvedUrl.protocol === 'data:') {
-    return resolvedUrl.toString()
-  }
-
-  if (resolvedUrl.protocol === 'file:') {
-    const sourcePath = fileURLToPath(resolvedUrl)
-    const extension = path.extname(sourcePath) || '.img'
-    const targetPath = path.join(cacheDirectory, `${targetBaseName}${extension}`)
-
-    if (path.resolve(sourcePath) !== path.resolve(targetPath)) {
-      await fs.copyFile(sourcePath, targetPath)
-    }
-
-    return pathToFileURL(targetPath).toString()
-  }
-
-  if (!/^https?:$/.test(resolvedUrl.protocol)) {
-    return undefined
-  }
-
-  try {
-    const response = await fetchRemoteResource(resolvedUrl)
-    if (!response.ok) {
-      return undefined
-    }
-
-    const extension = path.extname(resolvedUrl.pathname) || extensionFromContentType(response.headers.get('content-type'))
-    const imageBuffer = Buffer.from(await response.arrayBuffer())
-    return persistCoverBuffer(cacheDirectory, `${targetBaseName}${extension}`, imageBuffer)
-  } catch {
-    return undefined
-  }
-}
-
-function coverCandidateScore(image: Element): number {
-  const descriptor = [
-    image.getAttribute('alt'),
-    image.getAttribute('class'),
-    image.getAttribute('id'),
-    image.getAttribute('src'),
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-
-  const width = Number(image.getAttribute('width') ?? 0)
-  const height = Number(image.getAttribute('height') ?? 0)
-  let score = width > 0 && height > 0 ? width * height : 0
-
-  if (/cover|hero|feature|featured|lead|preview|header|banner/.test(descriptor)) {
-    score += 500_000
-  }
-
-  if (/logo|avatar|icon|emoji|author|profile|badge|sprite|tracking/.test(descriptor)) {
-    score -= 500_000
-  }
-
-  if (!Number.isFinite(score) || Number.isNaN(score)) {
-    return 0
-  }
-
-  return score
-}
-
-function pickHtmlCoverSource(document: Document): string | undefined {
-  const metaSelectors = [
-    'meta[property="og:image"]',
-    'meta[property="og:image:url"]',
-    'meta[name="twitter:image"]',
-    'meta[name="twitter:image:src"]',
-  ]
-
-  for (const selector of metaSelectors) {
-    const value = document.querySelector(selector)?.getAttribute('content')?.trim()
-
-    if (value) {
-      return value
-    }
-  }
-
-  const candidates = Array.from(
-    document.querySelectorAll('article img, main img, [itemprop="articleBody"] img, body img'),
-  )
-    .filter((image) => image.getAttribute('src'))
-    .sort((left, right) => coverCandidateScore(right) - coverCandidateScore(left))
-
-  return candidates[0]?.getAttribute('src') ?? undefined
-}
-
-async function extractHtmlCoverImage(
-  document: Document,
-  origin: string,
-  cacheDirectory: string,
-): Promise<string | undefined> {
-  const coverSource = pickHtmlCoverSource(document)
-
-  if (!coverSource) {
-    return undefined
-  }
-
-  return cacheImageAsset(coverSource, origin, cacheDirectory)
 }
 
 function domRootFromHtml(html: string) {
@@ -559,28 +215,6 @@ function htmlToBlocks(html: string): ReaderBlock[] {
   return blocks
 }
 
-function blocksToMarkdown(blocks: ReaderBlock[]): string {
-  return blocks
-    .map((block) => {
-      switch (block.type) {
-        case 'heading':
-          return `${'#'.repeat(block.level ?? 2)} ${block.text ?? ''}`.trim()
-        case 'quote':
-          return `> ${block.text ?? ''}`.trim()
-        case 'list':
-          return (block.items ?? []).map((item) => `- ${item}`).join('\n')
-        case 'code':
-          return `\`\`\`\n${block.text ?? ''}\n\`\`\``
-        case 'image':
-          return `![${block.alt ?? block.caption ?? 'Imported image'}](${block.src ?? ''})`
-        default:
-          return block.text ?? ''
-      }
-    })
-    .filter(Boolean)
-    .join('\n\n')
-}
-
 function textFromXmlValue(value: unknown): string {
   if (typeof value === 'string') {
     return value
@@ -598,214 +232,6 @@ function textFromXmlValue(value: unknown): string {
   return ''
 }
 
-async function cacheRemoteImagesInMarkdown(markdown: string, originUrl: string, cacheDirectory: string): Promise<string> {
-  const matches = Array.from(markdown.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g))
-  let nextMarkdown = markdown
-  let index = 0
-
-  for (const match of matches) {
-    const imageUrl = match[2]
-
-    if (!imageUrl || imageUrl.startsWith('data:') || imageUrl.startsWith('file:')) {
-      continue
-    }
-
-    let resolvedUrl: URL
-
-    try {
-      resolvedUrl = new URL(imageUrl, originUrl)
-    } catch {
-      continue
-    }
-
-    try {
-      const response = await fetchRemoteResource(resolvedUrl)
-      if (!response.ok) {
-        continue
-      }
-
-      const extension = path.extname(resolvedUrl.pathname) || extensionFromContentType(response.headers.get('content-type'))
-      const imageBuffer = Buffer.from(await response.arrayBuffer())
-      const targetPath = path.join(cacheDirectory, `web-image-${index}${extension}`)
-      await fs.writeFile(targetPath, imageBuffer)
-      nextMarkdown = nextMarkdown.replace(imageUrl, pathToFileURL(targetPath).toString())
-      index += 1
-    } catch {
-      continue
-    }
-  }
-
-  return nextMarkdown
-}
-
-async function runSummarizeExtract(url: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.env.NODE_BINARY || 'node',
-      [
-        resolveSummarizeCliPath(),
-        url,
-        '--extract',
-        '--format',
-        'md',
-        '--markdown-mode',
-        'readability',
-        '--plain',
-        '--no-color',
-        '--metrics',
-        'off',
-      ],
-      {
-        env: process.env,
-      },
-    )
-
-    let stdout = ''
-    let stderr = ''
-
-    child.stdout.on('data', (chunk: Buffer | string) => {
-      stdout += String(chunk)
-    })
-
-    child.stderr.on('data', (chunk: Buffer | string) => {
-      stderr += String(chunk)
-    })
-
-    child.on('error', (error) => {
-      reject(error)
-    })
-
-    child.on('close', (code) => {
-      if (code === 0 && stdout.trim()) {
-        resolve(stdout.trim())
-        return
-      }
-
-      reject(new Error(stderr.trim() || `Summarize exited with code ${code ?? 'unknown'}.`))
-    })
-  })
-}
-
-async function importMarkdownDocument(input: {
-  cacheDirectory: string
-  titleFallback: string
-  author: string
-  description: string
-  sourceType: DocumentRecord['sourceType']
-  preferredMode: DocumentRecord['preferredMode']
-  originLabel: string
-  extractedWith: string
-  markdown: string
-  coverImageUrl?: string
-  note?: string
-  sourcePath?: string
-  warnings?: string[]
-}): Promise<DocumentRecord> {
-  const title = extractTitleFromMarkdown(input.markdown, input.titleFallback)
-  const blocks = ensureReadableBlocks(markdownToBlocks(input.markdown), title)
-  return importBlockDocument({
-    cacheDirectory: input.cacheDirectory,
-    title,
-    author: input.author,
-    description: input.description,
-    sourceType: input.sourceType,
-    preferredMode: input.preferredMode,
-    originLabel: input.originLabel,
-    extractedWith: input.extractedWith,
-    blocks,
-    coverImageUrl: input.coverImageUrl,
-    note: input.note,
-    sourcePath: input.sourcePath,
-    warnings: input.warnings,
-  })
-}
-
-async function importBlockDocument(input: {
-  cacheDirectory: string
-  title: string
-  author: string
-  description: string
-  sourceType: DocumentRecord['sourceType']
-  preferredMode: DocumentRecord['preferredMode']
-  originLabel: string
-  extractedWith: string
-  blocks: ReaderBlock[]
-  coverImageUrl?: string
-  note?: string
-  sourcePath?: string
-  warnings?: string[]
-}): Promise<DocumentRecord> {
-  const chapters = splitBlocksIntoChapters(input.title, input.blocks)
-
-  return buildDocument({
-    id: path.basename(input.cacheDirectory),
-    title: input.title,
-    author: input.author,
-    description: input.description,
-    sourceType: input.sourceType,
-    preferredMode: input.preferredMode,
-    originLabel: input.originLabel,
-    extractedWith: input.extractedWith,
-    note: input.note,
-    chapters,
-    metadata: {
-      coverImageUrl: input.coverImageUrl,
-      sourcePath: input.sourcePath,
-      cacheDirectory: input.cacheDirectory,
-      warnings: input.warnings,
-    },
-  })
-}
-
-async function importTextLikeFile(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
-  const extension = path.extname(filePath).toLowerCase()
-  const fileName = path.basename(filePath)
-  const titleFallback = friendlyFilenameTitle(fileName.replace(/\.[^/.]+$/, '')) || 'Imported document'
-  const sourceCopyPath = path.join(cacheDirectory, `source${extension || '.txt'}`)
-  const rawText = await fs.readFile(filePath, 'utf8')
-  await fs.writeFile(sourceCopyPath, rawText, 'utf8')
-  const { document } = parseHTML(rawText)
-  const titleFromHtml = normalizeWhitespace(document.querySelector('title')?.textContent ?? '')
-  const author = normalizeWhitespace(
-    document.querySelector('meta[name="author"]')?.getAttribute('content') ?? 'Local import',
-  )
-  const fileOrigin = pathToFileURL(filePath).toString()
-  const coverImageUrl =
-    extension === '.html' || extension === '.htm'
-      ? await extractHtmlCoverImage(document, fileOrigin, cacheDirectory)
-      : undefined
-
-  if (extension === '.html' || extension === '.htm') {
-    return importBlockDocument({
-      cacheDirectory,
-      title: titleFromHtml || titleFallback,
-      author,
-      description: 'Local HTML content normalized into the unified reading surface.',
-      sourceType: 'web',
-      preferredMode: 'page',
-      originLabel: filePath,
-      extractedWith: 'Local HTML normalizer',
-      blocks: ensureReadableBlocks(htmlToBlocks(rawText), titleFromHtml || titleFallback),
-      coverImageUrl,
-      sourcePath: filePath,
-    })
-  }
-
-  return importMarkdownDocument({
-    cacheDirectory,
-    titleFallback: titleFromHtml || titleFallback,
-    author,
-    description: 'Local content normalized into the unified reading surface.',
-    sourceType: 'web',
-    preferredMode: 'page',
-    originLabel: filePath,
-    extractedWith: extension === '.html' || extension === '.htm' ? 'Local HTML to Markdown normalizer' : 'Markdown/text normalizer',
-    markdown: rawText,
-    coverImageUrl,
-    sourcePath: filePath,
-  })
-}
-
 function median(values: number[]): number {
   const sorted = [...values].sort((left, right) => left - right)
   const middle = Math.floor(sorted.length / 2)
@@ -821,166 +247,320 @@ function median(values: number[]): number {
   return sorted[middle]
 }
 
+// ─── MuPDF structured-text types ──────────────────────────────────────────────
+// Actual shape from mupdf asJSON() — lines are flat (no spans array):
+// { blocks: [{ type, bbox: {x,y,w,h}, lines: [{ wmode, bbox: {x,y,w,h,flags},
+//   font: {name,family,weight,style,size}, x, y, text }] }] }
+
+interface MuFont {
+  name: string
+  family: string
+  weight: string   // 'normal' | 'bold'
+  style: string    // 'normal' | 'italic'
+  size: number
+}
+
+interface MuBBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+interface MuLine {
+  wmode: number
+  bbox: MuBBox & { flags?: number }
+  font: MuFont
+  x: number
+  y: number
+  text: string
+}
+
+interface MuBlock {
+  type: 'text' | 'image'
+  bbox: MuBBox
+  lines?: MuLine[]
+}
+
+interface MuStructuredPage {
+  blocks: MuBlock[]
+}
+
+// ─── Internal representation ──────────────────────────────────────────────────
+
 interface PdfLine {
   text: string
   x: number
   y: number
   fontSize: number
+  bold: boolean
+  italic: boolean
   pageNumber: number
   pageHeight: number
 }
 
-async function extractPdfCoverImage(
-  pdf: Awaited<ReturnType<typeof getPdfDocument>['promise']>,
-  cacheDirectory: string,
-): Promise<string | undefined> {
-  let fallbackImage: { area: number; buffer: Buffer } | null = null
+// ─── Cover image ─────────────────────────────────────────────────────────────
 
-  for (let pageNumber = 1; pageNumber <= Math.min(pdf.numPages, 6); pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber)
-    const operatorList = await page.getOperatorList()
+function renderMuPageAsCover(doc: InstanceType<typeof mupdf.Document>, cacheDirectory: string): string | undefined {
+  const pageCount = doc.countPages()
 
-    for (let index = 0; index < operatorList.fnArray.length; index += 1) {
-      const operator = operatorList.fnArray[index]
-      const args = operatorList.argsArray[index]
-      const objectId = typeof args?.[0] === 'string' ? args[0] : null
-      const imageCandidate =
-        operator === OPS.paintInlineImageXObject
-          ? args?.[0]
-          : objectId && page.objs.has(objectId)
-            ? page.objs.get(objectId)
-            : objectId && page.commonObjs.has(objectId)
-              ? page.commonObjs.get(objectId)
-              : null
+  for (const pageIndex of [0, 1]) {
+    if (pageIndex >= pageCount) break
 
-      if (!isPdfBinaryImage(imageCandidate) || imageCandidate.width < 96 || imageCandidate.height < 96) {
-        continue
-      }
+    const page = doc.loadPage(pageIndex)
+    const bounds = page.getBounds()           // [x0, y0, x1, y1]
+    const pageWidth = bounds[2] - bounds[0]
+    const pageHeight = bounds[3] - bounds[1]
 
-      const rgba = toRgbaImageData(imageCandidate)
-      if (!rgba) {
-        continue
-      }
+    // Scale so the longer side is 900px (good cover thumbnail quality)
+    const scale = 900 / Math.max(pageWidth, pageHeight)
+    const matrix = mupdf.Matrix.scale(scale, scale)
+    const pixmap = page.toPixmap(matrix, mupdf.ColorSpace.DeviceRGB, false)
 
-      const buffer = encodeRgbaPng(imageCandidate.width, imageCandidate.height, rgba)
-      const area = imageCandidate.width * imageCandidate.height
-
-      if (area >= 48_000) {
-        return persistCoverBuffer(cacheDirectory, 'cover.png', buffer)
-      }
-
-      if (!fallbackImage || area > fallbackImage.area) {
-        fallbackImage = { area, buffer }
-      }
-    }
-  }
-
-  const renderedCover = await renderPdfPageAsCover(pdf, cacheDirectory)
-  if (renderedCover) {
-    return renderedCover
-  }
-
-  if (!fallbackImage) {
-    return undefined
-  }
-
-  return persistCoverBuffer(cacheDirectory, 'cover.png', fallbackImage.buffer)
-}
-
-async function renderPdfPageAsCover(
-  pdf: Awaited<ReturnType<typeof getPdfDocument>['promise']>,
-  cacheDirectory: string,
-): Promise<string | undefined> {
-  // Try page 1, fall back to page 2 if page 1 appears blank
-  for (const pageNumber of [1, 2]) {
-    if (pageNumber > pdf.numPages) break
-
-    const page = await pdf.getPage(pageNumber)
-    const viewport = page.getViewport({ scale: 1.5 })
-    const canvas = createCanvas(Math.round(viewport.width), Math.round(viewport.height))
-    const context = canvas.getContext('2d')
-
-    await page.render({
-      canvas: canvas as unknown as HTMLCanvasElement,
-      viewport,
-    }).promise
-
-    const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
-    const pixels = imageData.data
-    let nonWhitePixels = 0
-    for (let i = 0; i < pixels.length; i += 4) {
+    // Blank-page guard: check that at least 1% of pixels are non-white
+    const pixels = pixmap.getPixels()
+    let nonWhite = 0
+    for (let i = 0; i < pixels.length; i += 3) {
       if (pixels[i] < 240 || pixels[i + 1] < 240 || pixels[i + 2] < 240) {
-        nonWhitePixels += 1
+        nonWhite += 1
       }
     }
-
-    const totalPixels = canvas.width * canvas.height
-    if (nonWhitePixels / totalPixels < 0.01) {
-      // Page is nearly blank, try next
+    const totalPixels = pixmap.getWidth() * pixmap.getHeight()
+    if (nonWhite / totalPixels < 0.01) {
       continue
     }
 
-    const buffer = canvas.toBuffer('image/jpeg', 85)
-    return persistCoverBuffer(cacheDirectory, 'cover.jpg', Buffer.from(buffer))
+    const jpegBytes = pixmap.asJPEG(85)
+    const coverPath = path.join(cacheDirectory, 'cover.jpg')
+    fsSync.writeFileSync(coverPath, jpegBytes)
+    return pathToFileURL(coverPath).toString()
   }
 
   return undefined
 }
 
-function collectPdfLines(items: Array<Record<string, unknown>>, pageNumber: number, pageHeight: number): PdfLine[] {
-  const textItems = items
-    .filter((item) => typeof item.str === 'string' && normalizeWhitespace(String(item.str)).length > 0)
-    .map((item) => {
-      const transform = item.transform as number[] | undefined
-      const x = transform?.[4] ?? 0
-      const y = transform?.[5] ?? 0
-      const fontSize = Math.abs(Number(item.height ?? transform?.[0] ?? 14))
+// ─── Structured text → PdfLine[] ─────────────────────────────────────────────
 
-      return {
-        text: normalizeWhitespace(String(item.str)),
-        x,
-        y,
-        fontSize,
-        pageNumber,
-        pageHeight,
-      }
-    })
-    .sort((left, right) => {
-      const verticalDiff = right.y - left.y
-      if (Math.abs(verticalDiff) > 2) {
-        return verticalDiff
-      }
-      return left.x - right.x
-    })
+/**
+ * Detect whether a page has a two-column layout.
+ * Heuristic: collect all body-text x positions and look for two clear clusters
+ * (left column ~0-45% of page width, right column ~50-100%).
+ */
+function detectColumnSplit(rawLines: PdfLine[], pageWidth: number): number | null {
+  if (pageWidth <= 0) return null
+  const xRatios = rawLines.map((l) => l.x / pageWidth)
+  // Count lines in left (<40%) and right (>50%) bands
+  const left = xRatios.filter((r) => r < 0.4).length
+  const right = xRatios.filter((r) => r > 0.5).length
+  const total = rawLines.length
+  if (total < 6) return null
+  // Both columns must have at least 25% of lines to be considered two-column
+  if (left / total >= 0.25 && right / total >= 0.25) {
+    // Find the midpoint gap
+    return pageWidth * 0.48
+  }
+  return null
+}
 
-  const lines: PdfLine[] = []
+/**
+ * Re-order a set of lines from a two-column page so that left column comes
+ * entirely before right column, maintaining vertical order within each column.
+ */
+function reorderByColumns(lines: PdfLine[], splitX: number): PdfLine[] {
+  const leftCol = lines.filter((l) => l.x <= splitX).sort((a, b) => a.y - b.y)
+  const rightCol = lines.filter((l) => l.x > splitX).sort((a, b) => a.y - b.y)
+  return [...leftCol, ...rightCol]
+}
 
-  for (const item of textItems) {
-    const currentLine = lines[lines.length - 1]
+function muPageToLines(page: InstanceType<typeof mupdf.Page>, pageNumber: number): PdfLine[] {
+  const bounds = page.getBounds()
+  const pageWidth = bounds[2] - bounds[0]
+  const pageHeight = bounds[3] - bounds[1]
 
-    if (currentLine && Math.abs(currentLine.y - item.y) <= Math.max(2, item.fontSize * 0.35)) {
-      const spacer = /[-/([{]$/.test(currentLine.text) || /^[,.;:!?)]/.test(item.text) ? '' : ' '
-      currentLine.text = `${currentLine.text}${spacer}${item.text}`.trim()
-      currentLine.fontSize = Math.max(currentLine.fontSize, item.fontSize)
-      currentLine.x = Math.min(currentLine.x, item.x)
-      continue
+  const stext: MuStructuredPage = JSON.parse(page.toStructuredText('preserve-whitespace').asJSON())
+  const rawLines: PdfLine[] = []
+
+  for (const block of stext.blocks) {
+    if (block.type !== 'text' || !block.lines) continue
+
+    for (const line of block.lines) {
+      // In MuPDF's asJSON() each line has text/font/x/y directly — no spans array
+      const text = normalizeWhitespace(line.text ?? '')
+      if (!text) continue
+
+      // Font metadata comes from line.font
+      const fontSize = line.font?.size ?? 10
+      const bold = line.font?.weight === 'bold'
+      const italic = line.font?.style === 'italic'
+
+      // bbox is an object {x, y, w, h} — use line's own x/y for position
+      const x = line.bbox.x
+      const y = line.bbox.y
+
+      rawLines.push({ text, x, y, fontSize, bold, italic, pageNumber, pageHeight })
     }
-
-    lines.push(item)
   }
 
-  return lines
-}
+  // Sort top-to-bottom, left-to-right
+  rawLines.sort((a, b) => {
+    const dy = a.y - b.y
+    return Math.abs(dy) > 2 ? dy : a.x - b.x
+  })
 
-function titleCaseIfLikelyHeading(text: string): string {
-  if (text === text.toUpperCase() && /[A-Z]/.test(text)) {
-    return text
-      .toLowerCase()
-      .replace(/\b\w/g, (char) => char.toUpperCase())
+  // Merge fragments that share the same visual line (same y ± 2pt).
+  // This handles justified text where MuPDF emits each word/run as a separate entry.
+  const mergedByRow: PdfLine[] = []
+  for (const line of rawLines) {
+    const prev = mergedByRow[mergedByRow.length - 1]
+    if (prev && Math.abs(line.y - prev.y) <= 2 && line.fontSize === prev.fontSize) {
+      // Same visual row and same font size — join with a space
+      prev.text = normalizeWhitespace(`${prev.text} ${line.text}`)
+    } else {
+      mergedByRow.push({ ...line })
+    }
   }
 
-  return text
+  // If this page has two columns, re-order so left column precedes right column
+  const splitX = detectColumnSplit(mergedByRow, pageWidth)
+  if (splitX !== null) {
+    return reorderByColumns(mergedByRow, splitX)
+  }
+
+  return mergedByRow
 }
+
+// ─── Per-page image extraction ────────────────────────────────────────────────
+
+interface ExtractedPageImage {
+  /** Y coordinate of the image's top edge in page units */
+  y: number
+  block: ReaderBlock
+}
+
+/**
+ * Run the page through a mupdf Device to intercept every fillImage call,
+ * render each image to a JPEG, save it to cacheDirectory, and return
+ * ReaderBlocks (type 'image') with file:// src URLs and their page-Y position.
+ *
+ * Images smaller than minAreaFraction of the page area are skipped (decorative
+ * icons, bullets, etc.).
+ */
+function extractPageImages(
+  page: InstanceType<typeof mupdf.Page>,
+  pageNumber: number,
+  cacheDirectory: string,
+  minAreaFraction = 0.01,
+): ExtractedPageImage[] {
+  const bounds = page.getBounds()
+  const pageArea = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
+  const results: ExtractedPageImage[] = []
+  let imageIndex = 0
+
+  const callbacks = {
+    fillImage(image: InstanceType<typeof mupdf.Image>, ctm: number[], _alpha: number) {
+      // ctm maps unit-square to page coords: [a,b,c,d,e,f]
+      // For non-rotated: x=e, y=f, w=|a|, h=|d|
+      const y = Math.min(ctm[5], ctm[5] + ctm[3])
+      const w = Math.abs(ctm[0])
+      const h = Math.abs(ctm[3])
+      const area = w * h
+
+      // Skip tiny decorative images
+      if (area < pageArea * minAreaFraction) return
+
+      try {
+        // Convert to RGB pixmap then JPEG — force DeviceRGB + no alpha so
+        // images stored in Gray, CMYK, or with an inverted mask render correctly
+        const rawPixmap = image.toPixmap()
+        const pixmap = rawPixmap.convertToColorSpace(mupdf.ColorSpace.DeviceRGB)
+        const jpegBytes = pixmap.asJPEG(85)
+        const fileName = `pdf-p${pageNumber}-img${imageIndex}.jpg`
+        const filePath = path.join(cacheDirectory, fileName)
+        fsSync.writeFileSync(filePath, jpegBytes)
+        const src = pathToFileURL(filePath).toString()
+
+        results.push({
+          y,
+          block: {
+            id: createId('block'),
+            type: 'image',
+            src,
+            alt: `Image on page ${pageNumber}`,
+          },
+        })
+        imageIndex += 1
+      } catch {
+        // Some images (masks, CMYK without proper colorspace) may fail — skip silently
+      }
+    },
+  }
+
+  const device = new mupdf.Device(callbacks)
+  page.run(device, mupdf.Matrix.identity)
+  device.close()
+
+  return results
+}
+
+/**
+ * Merge image blocks into an existing ordered block array.
+ * Each image is inserted after the last text/heading/list block whose Y
+ * centroid is above the image's Y position.
+ * Image Y positions are approximate page-unit values from the Device CTM.
+ */
+function mergeImageBlocksIntoPage(
+  blocks: ReaderBlock[],
+  images: ExtractedPageImage[],
+  pageLines: PdfLine[],
+): ReaderBlock[] {
+  if (images.length === 0) return blocks
+
+  // Build a Y-centroid for each block by finding which lines contributed to it.
+  // Since we don't have per-block Y in ReaderBlock, we use the source PdfLines
+  // sorted by index to assign approximate block order; image Y thresholds
+  // are compared against cumulative page Y of the text stream.
+
+  // Simpler approach: map each block to an approximate Y by scanning pageLines
+  // in order. We know blocks are emitted in reading order; we can assign a
+  // "Y anchor" by tracking which page-line was consumed when the block was produced.
+  // As a good approximation, assign Y anchors from sorted unique Y values of lines.
+
+  const sortedLineYs = [...new Set(pageLines.map((l) => l.y))].sort((a, b) => a - b)
+  const blockCount = blocks.length
+
+  // Spread block indices evenly across sortedLineYs
+  function blockY(blockIdx: number): number {
+    if (sortedLineYs.length === 0) return 0
+    const ratio = blockCount <= 1 ? 0 : blockIdx / (blockCount - 1)
+    const lineIdx = Math.round(ratio * (sortedLineYs.length - 1))
+    return sortedLineYs[Math.min(lineIdx, sortedLineYs.length - 1)]
+  }
+
+  const result: ReaderBlock[] = []
+  const sortedImages = [...images].sort((a, b) => a.y - b.y)
+  let nextImageIdx = 0
+
+  for (let bi = 0; bi < blocks.length; bi++) {
+    result.push(blocks[bi])
+
+    // After this block, flush any images whose Y <= the next block's Y anchor
+    const nextBlockY = bi + 1 < blocks.length ? blockY(bi + 1) : Infinity
+    while (nextImageIdx < sortedImages.length && sortedImages[nextImageIdx].y <= nextBlockY) {
+      result.push(sortedImages[nextImageIdx].block)
+      nextImageIdx++
+    }
+  }
+
+  // Any remaining images go at the end
+  while (nextImageIdx < sortedImages.length) {
+    result.push(sortedImages[nextImageIdx].block)
+    nextImageIdx++
+  }
+
+  return result
+}
+
+// ─── Running header/footer removal ───────────────────────────────────────────
 
 function normalizePdfLineSignature(text: string): string {
   return normalizeWhitespace(text).replace(/\b\d+\b/g, '#').toLowerCase()
@@ -989,120 +569,243 @@ function normalizePdfLineSignature(text: string): string {
 function filterRepeatedPdfChrome(pages: Array<{ pageNumber: number; lines: PdfLine[] }>): Array<{ pageNumber: number; lines: PdfLine[] }> {
   const signatureCounts = new Map<string, number>()
 
-  pages.forEach(({ lines }) => {
+  for (const { lines } of pages) {
     const pageSignatures = new Set<string>()
-
-    lines.forEach((line) => {
+    for (const line of lines) {
       const verticalRatio = line.pageHeight === 0 ? 0 : line.y / line.pageHeight
-      const isMarginLine = verticalRatio >= 0.88 || verticalRatio <= 0.12
-
-      if (!isMarginLine) {
-        return
-      }
-
-      const signature = normalizePdfLineSignature(line.text)
-      if (signature.length >= 3) {
-        pageSignatures.add(signature)
-      }
-    })
-
-    pageSignatures.forEach((signature) => {
-      signatureCounts.set(signature, (signatureCounts.get(signature) ?? 0) + 1)
-    })
-  })
+      const isMarginLine = verticalRatio <= 0.12 || verticalRatio >= 0.88
+      if (!isMarginLine) continue
+      const sig = normalizePdfLineSignature(line.text)
+      if (sig.length >= 3) pageSignatures.add(sig)
+    }
+    for (const sig of pageSignatures) {
+      signatureCounts.set(sig, (signatureCounts.get(sig) ?? 0) + 1)
+    }
+  }
 
   return pages.map(({ pageNumber, lines }) => ({
     pageNumber,
     lines: lines.filter((line) => {
       const verticalRatio = line.pageHeight === 0 ? 0 : line.y / line.pageHeight
-      const isMarginLine = verticalRatio >= 0.88 || verticalRatio <= 0.12
-
-      if (!isMarginLine) {
-        return true
-      }
-
-      const signature = normalizePdfLineSignature(line.text)
-      return (signatureCounts.get(signature) ?? 0) < 3
+      const isMarginLine = verticalRatio <= 0.12 || verticalRatio >= 0.88
+      if (!isMarginLine) return true
+      return (signatureCounts.get(normalizePdfLineSignature(line.text)) ?? 0) < 3
     }),
   }))
 }
 
-function normalizePdfParagraphText(lines: string[]): string {
-  return normalizeWhitespace(
-    lines
-      .join(' ')
-      .replace(/(\w)-\s+([a-z])/g, '$1$2')
-      .replace(/\s+([,.;:!?])/g, '$1'),
-  )
+// ─── PdfLine[] → ReaderBlock[] ───────────────────────────────────────────────
+
+function titleCaseIfLikelyHeading(text: string): string {
+  if (text === text.toUpperCase() && /[A-Z]/.test(text)) {
+    return text.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
+  }
+  return text
 }
 
-function pdfPageToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlock[] {
+function normalizePdfParagraphText(lines: string[]): string {
+  // Join lines one-by-one. If a line ends with a hyphen and the next starts with a lowercase
+  // letter it's a PDF line-break hyphen: keep the hyphen and join without an extra space
+  // (the hyphen may be structural as in "chain-of-thought" or a break hyphen as in "promis-ing").
+  let result = ''
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (i === 0) {
+      result = line
+      continue
+    }
+    const nextStart = line[0] ?? ''
+    if (result.endsWith('-') && /[a-z]/.test(nextStart)) {
+      // Keep the trailing hyphen and join directly (no extra space)
+      result = result + line
+    } else {
+      result = result + ' ' + line
+    }
+  }
+  return normalizeWhitespace(result.replace(/\s+([,.;:!?])/g, '$1'))
+}
+
+function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlock[] {
   const blocks: ReaderBlock[] = []
   let paragraphBuffer: string[] = []
   let listBuffer: string[] = []
   let previousLine: PdfLine | null = null
+  // Accumulate consecutive heading-candidate lines to join wrapped headings
+  let headingBuffer: { text: string; fontSize: number; bold: boolean } | null = null
 
   const flushParagraph = () => {
-    if (paragraphBuffer.length === 0) {
-      return
-    }
-
-    blocks.push({
-      id: createId('block'),
-      type: 'paragraph',
-      text: normalizePdfParagraphText(paragraphBuffer),
-    })
+    if (paragraphBuffer.length === 0) return
+    blocks.push({ id: createId('block'), type: 'paragraph', text: normalizePdfParagraphText(paragraphBuffer) })
     paragraphBuffer = []
   }
 
   const flushList = () => {
-    if (listBuffer.length === 0) {
-      return
-    }
-
-    blocks.push({
-      id: createId('block'),
-      type: 'list',
-      items: [...listBuffer],
-    })
+    if (listBuffer.length === 0) return
+    blocks.push({ id: createId('block'), type: 'list', items: [...listBuffer] })
     listBuffer = []
   }
 
-  for (const line of lines) {
-    const gap = previousLine ? Math.abs(previousLine.y - line.y) : line.fontSize
-    const indentationDelta = previousLine ? Math.abs(line.x - previousLine.x) : 0
-    const endsSentence = /[.!?:"”']$/.test(paragraphBuffer[paragraphBuffer.length - 1] ?? '')
+  const flushHeading = () => {
+    if (!headingBuffer) return
+    blocks.push({
+      id: createId('block'),
+      type: 'heading',
+      level: headingBuffer.fontSize >= baselineFontSize * 1.4 ? 2 : 3,
+      text: titleCaseIfLikelyHeading(headingBuffer.text),
+    })
+    headingBuffer = null
+  }
+
+  // Pre-process: merge lone bullet marker lines and drop-cap letter lines into the
+  // following text line. MuPDF sometimes emits "•" as a separate line at the same y,
+  // and ornamental drop-caps as isolated single letters on their own line.
+  const mergedLines: PdfLine[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const cur = lines[i]
+    const next = lines[i + 1]
+
+    // Bullet marker on its own line immediately before/beside the text
+    if (/^[-\u2022*]$/.test(cur.text) && next && Math.abs(next.y - cur.y) <= cur.fontSize * 0.6) {
+      mergedLines.push({ ...next, text: `${cur.text} ${next.text}` })
+      i++
+      continue
+    }
+
+    // Drop-cap: single uppercase letter immediately before a continuation line
+    // (continuation starts with a lowercase letter, indicating the cap was the first letter of a word)
+    const isDropCap =
+      /^[A-Z]$/.test(cur.text) &&
+      next !== undefined &&
+      /^[a-z]/.test(next.text) &&
+      Math.abs(next.y - cur.y) <= cur.fontSize * 2.5
+
+    if (isDropCap && next) {
+      mergedLines.push({ ...next, text: `${cur.text}${next.text}` })
+      i++
+      continue
+    }
+
+    mergedLines.push(cur)
+  }
+
+  for (const line of mergedLines) {
+    // ── Skip lone page-number lines (just a number, possibly with roman numerals) ──
+    if (/^[ivxlcdmIVXLCDM\d]+$/.test(line.text) && line.text.length <= 4) {
+      continue
+    }
+
+    // ── Skip residual single-letter drop-caps that had no mergeable successor ──
+    if (/^[A-Z]$/.test(line.text)) {
+      continue
+    }
+
+    const gap = previousLine ? line.y - previousLine.y : line.fontSize
+    const indentDelta = previousLine ? Math.abs(line.x - previousLine.x) : 0
+    const endsSentence = /[.!?:""']$/.test(paragraphBuffer[paragraphBuffer.length - 1] ?? '')
     const isListItem = /^([-\u2022*]|(\d+[.)]))\s+/.test(line.text)
     const wordCount = line.text.split(/\s+/).filter(Boolean).length
     const startsLikeHeading = /^[A-Z0-9IVX]/.test(line.text) && !/^[a-z]/.test(line.text)
-    const endsLikeSentence = /[.!?]$/.test(line.text)
+    const endsLikeSentence = /[.!?;]$/.test(line.text) || (!/^[A-Z0-9][A-Z0-9\s,'":.-]+$/.test(line.text) && /,$/.test(line.text))
+
+    // A bold line that contains a mid-sentence period (e.g. "OpenAI. Founded in 2015 by eight people"
+    // or "Anthropic (Claude). Founded in 2020 by") is a bold lead-in for the following paragraph,
+    // NOT a standalone heading.
+    const hasMidSentencePeriod = /[A-Za-z)]\.\s+[A-Z]/.test(line.text)
+
+    // A line ending with a stop/continuation word is an incomplete sentence fragment, not a heading.
+    // Exception: ALL-CAPS lines (e.g. "CHOOSING A PROVIDER AND") are section titles and must not
+    // be filtered out by stop-word check.
+    const isAllCaps = /^[A-Z0-9][A-Z0-9\s,'":.-]+$/.test(line.text)
+    const endsWithStopWord =
+      !isAllCaps &&
+      /\b(a|an|the|in|of|to|for|on|at|by|as|with|from|into|than|that|which|and|or|is|are|was|were|be|been|being|have|has|had|its|checking|building|provide|being|make|can|need|now|use|take|do|get|set|well|just|only|also|both|even|here|there|when|where|how|what|why|who|up|out|down|back|will)$/i.test(line.text)
+
+    // A bold baseline-font line that has a colon mid-sentence (e.g. "Chunking: You start by taking
+    // a document") is a definition/lead-in line, not a standalone heading.
+    // Exception: short "label:" headings like "Best Practices:" (≤3 words and ends with the colon)
+    const hasDefinitionColon =
+      line.bold &&
+      line.fontSize < baselineFontSize * 1.28 &&
+      /:\s+[A-Z]/.test(line.text) &&
+      wordCount >= 4
+
+    // A bold baseline-font line that contains a finite verb in a predicate position is a sentence
+    // fragment lead-in, not a heading. E.g. "Multi-agent systems cover the coordination" or
+    // "Others include Mistral (an open-source".
+    // Only apply to baseline-size bold lines (larger fonts are genuine section titles).
+    const hasSentenceVerb =
+      line.bold &&
+      line.fontSize < baselineFontSize * 1.28 &&
+      /\b(introduces?|covers?|explores?|examines?|discusses?|describes?|helps?|allows?|provides?|enables?|shows?|demonstrate[sd]?|presents?|includes?)\b/i.test(line.text)
+
+    // A line is a heading when:
+    // 1. font is noticeably larger than baseline (≥1.28×), OR bold + short, OR ALL-CAPS short text
+    //    Single-word lines qualify as headings only when the font is clearly display-size (≥2× baseline)
+    // 2. doesn't end like a sentence (avoids false positives from first sentences)
+    // 3. not a list marker
+    // 4. not a bold lead-in opener (mid-sentence period, ends with stop word, definition colon, or predicate verb)
+    // For ALL-CAPS lines, a single hyphenated "word" still qualifies (e.g. "RETRIEVAL-AUGMENTED")
     const isHeading =
       !isListItem &&
-      line.text.length <= 100 &&
-      (wordCount >= 2 || /^\d+$/.test(line.text)) &&
+      !hasMidSentencePeriod &&
+      !endsWithStopWord &&
+      !hasSentenceVerb &&
+      !hasDefinitionColon &&
+      line.text.length <= 120 &&
+      (wordCount >= 2 || isAllCaps || line.fontSize >= baselineFontSize * 2.0) &&
       startsLikeHeading &&
       !endsLikeSentence &&
       (line.fontSize >= baselineFontSize * 1.28 ||
+        (line.bold && wordCount <= 12 && line.fontSize >= baselineFontSize * 0.95) ||
         (/^[A-Z0-9][A-Z0-9\s,'":.-]{3,}$/.test(line.text) && wordCount <= 12))
-    const startsNewParagraph =
-      gap > line.fontSize * 1.65 || indentationDelta > Math.max(18, line.fontSize * 1.1) || endsSentence
 
-    if (startsNewParagraph) {
-      flushParagraph()
-      flushList()
-    }
+    // New paragraph when vertical gap is large, big indentation shift, or previous line ended a sentence
+    const startsNewParagraph =
+      gap > line.fontSize * 1.65 || indentDelta > Math.max(18, line.fontSize * 1.1) || endsSentence
 
     if (isHeading) {
       flushParagraph()
       flushList()
-      blocks.push({
-        id: createId('block'),
-        type: 'heading',
-        level: line.fontSize >= baselineFontSize * 1.4 ? 2 : 3,
-        text: titleCaseIfLikelyHeading(line.text),
-      })
+      // Try to join with a previous heading line if it's a continuation
+      // (same font size, bold flag, and small vertical gap)
+      const sameStyle =
+        headingBuffer !== null &&
+        previousLine !== null &&
+        Math.abs(line.fontSize - headingBuffer.fontSize) < 1 &&
+        line.bold === previousLine.bold &&
+        gap <= line.fontSize * 2.0
+      if (sameStyle && headingBuffer) {
+        headingBuffer.text = `${headingBuffer.text} ${line.text}`
+      } else {
+        flushHeading()
+        headingBuffer = { text: line.text, fontSize: line.fontSize, bold: line.bold }
+      }
       previousLine = line
       continue
+    }
+
+    // Non-heading line — but if there's an active headingBuffer and this line looks like
+    // a continuation of the heading (ALL-CAPS 1-3 word label, small gap, similar size),
+    // append it to the heading rather than flushing.
+    const isHeadingContinuation =
+      headingBuffer !== null &&
+      previousLine !== null &&
+      gap <= line.fontSize * 2.5 &&
+      wordCount <= 3 &&
+      /^[A-Z][A-Z0-9\s]+$/.test(line.text) &&
+      Math.abs(line.fontSize - headingBuffer.fontSize) <= headingBuffer.fontSize * 0.5
+
+    if (isHeadingContinuation && headingBuffer) {
+      headingBuffer.text = `${headingBuffer.text} ${line.text}`
+      previousLine = line
+      continue
+    }
+
+    flushHeading()
+
+    if (startsNewParagraph) {
+      flushParagraph()
+      flushList()
     }
 
     if (isListItem) {
@@ -1116,64 +819,38 @@ function pdfPageToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBloc
     previousLine = line
   }
 
+  flushHeading()
   flushParagraph()
   flushList()
 
   return blocks
 }
 
-async function resolvePdfDestinationPageNumber(
-  pdf: Awaited<ReturnType<typeof getPdfDocument>['promise']>,
-  destination: unknown,
-): Promise<number | null> {
-  if (!destination) {
-    return null
-  }
+// ─── Outline → chapter map ───────────────────────────────────────────────────
 
-  let explicitDestination: unknown = destination
-
-  if (typeof destination === 'string') {
-    explicitDestination = await pdf.getDestination(destination)
-  }
-
-  if (!Array.isArray(explicitDestination) || explicitDestination.length === 0) {
-    return null
-  }
-
-  const target = explicitDestination[0] as Partial<RefProxy> | null
-
-  if (!target || typeof target !== 'object' || typeof target.num !== 'number' || typeof target.gen !== 'number') {
-    return null
-  }
-
-  return (await pdf.getPageIndex(target as RefProxy)) + 1
+interface OutlineItem {
+  title: string | undefined
+  uri: string | undefined
+  open: boolean
+  down?: OutlineItem[]
+  page?: number
 }
 
-async function extractPdfOutlineMap(
-  pdf: Awaited<ReturnType<typeof getPdfDocument>['promise']>,
-): Promise<Map<number, string>> {
-  const outline = await pdf.getOutline()
+function extractOutlineMap(outline: OutlineItem[] | null): Map<number, string> {
   const pageMap = new Map<number, string>()
 
-  const walk = async (items: Array<{ title: string; dest?: unknown; items?: unknown[] }>): Promise<void> => {
+  const walk = (items: OutlineItem[]) => {
     for (const item of items) {
-      const pageNumber = await resolvePdfDestinationPageNumber(pdf, item.dest)
       const title = normalizeWhitespace(item.title ?? '')
-
-      if (pageNumber && title && !pageMap.has(pageNumber)) {
-        pageMap.set(pageNumber, title)
+      // MuPDF gives us 0-based page index directly
+      if (typeof item.page === 'number' && item.page >= 0 && title && !pageMap.has(item.page + 1)) {
+        pageMap.set(item.page + 1, title)
       }
-
-      if (Array.isArray(item.items) && item.items.length > 0) {
-        await walk(item.items as Array<{ title: string; dest?: unknown; items?: unknown[] }>)
-      }
+      if (item.down && item.down.length > 0) walk(item.down)
     }
   }
 
-  if (Array.isArray(outline) && outline.length > 0) {
-    await walk(outline as Array<{ title: string; dest?: unknown; items?: unknown[] }>)
-  }
-
+  if (outline && outline.length > 0) walk(outline)
   return pageMap
 }
 
@@ -1182,28 +859,21 @@ function buildPdfChaptersFromOutline(
   outlineMap: Map<number, string>,
   fallbackTitle: string,
 ): Chapter[] {
-  if (outlineMap.size === 0) {
-    return []
-  }
+  if (outlineMap.size === 0) return []
 
   const chapters: Chapter[] = []
   let currentChapter: Chapter | null = null
 
   for (const page of pageBlocks) {
     const outlineTitle = outlineMap.get(page.pageNumber)
-    const pageContent =
-      outlineTitle
-        ? page.blocks.filter(
-            (block) =>
-              block.type !== 'heading' || normalizeWhitespace(block.text ?? '') !== normalizeWhitespace(outlineTitle),
-          )
-        : page.blocks
+    const pageContent = outlineTitle
+      ? page.blocks.filter(
+          (b) => b.type !== 'heading' || normalizeWhitespace(b.text ?? '') !== normalizeWhitespace(outlineTitle),
+        )
+      : page.blocks
 
     if (!currentChapter || outlineTitle) {
-      if (currentChapter && currentChapter.content.length > 0) {
-        chapters.push(currentChapter)
-      }
-
+      if (currentChapter && currentChapter.content.length > 0) chapters.push(currentChapter)
       currentChapter = {
         id: createId('chapter'),
         title: outlineTitle || (chapters.length === 0 ? fallbackTitle : `Section ${chapters.length + 1}`),
@@ -1215,23 +885,16 @@ function buildPdfChaptersFromOutline(
     currentChapter.content.push(...pageContent)
   }
 
-  if (currentChapter && currentChapter.content.length > 0) {
-    chapters.push(currentChapter)
-  }
-
+  if (currentChapter && currentChapter.content.length > 0) chapters.push(currentChapter)
   return chapters
 }
 
+// ─── Chapter cleanup ──────────────────────────────────────────────────────────
+
 function chapterWordCount(chapter: Chapter): number {
   return chapter.content.reduce((total, block) => {
-    if (block.text) {
-      return total + block.text.split(/\s+/).filter(Boolean).length
-    }
-
-    if (block.items) {
-      return total + block.items.join(' ').split(/\s+/).filter(Boolean).length
-    }
-
+    if (block.text) return total + block.text.split(/\s+/).filter(Boolean).length
+    if (block.items) return total + block.items.join(' ').split(/\s+/).filter(Boolean).length
     return total
   }, 0)
 }
@@ -1241,15 +904,15 @@ function cleanupPdfChapters(chapters: Chapter[], fallbackTitle: string): Chapter
 
   chapters.forEach((chapter, index) => {
     const words = chapterWordCount(chapter)
-    const hasMeaningfulBody = chapter.content.some((block) => ['paragraph', 'quote', 'list', 'code'].includes(block.type))
+    const hasMeaningfulBody = chapter.content.some((b) => ['paragraph', 'quote', 'list', 'code'].includes(b.type))
     const title = normalizeWhitespace(chapter.title)
     const isTinyFrontMatter =
       index < 3 &&
       (title === fallbackTitle || /^(\d+(st|nd|rd|th)? edition|contents|foreword|preface)$/i.test(title) || words < 60)
 
     if ((!hasMeaningfulBody && words === 0) || (isTinyFrontMatter && chapters[index + 1])) {
-      const nextChapter = chapters[index + 1]
-      nextChapter.content = [...chapter.content.filter((block) => block.type !== 'heading'), ...nextChapter.content]
+      const next = chapters[index + 1]
+      next.content = [...chapter.content.filter((b) => b.type !== 'heading'), ...next.content]
       return
     }
 
@@ -1259,56 +922,79 @@ function cleanupPdfChapters(chapters: Chapter[], fallbackTitle: string): Chapter
   return cleaned
 }
 
+// ─── Top-level PDF importer ───────────────────────────────────────────────────
+
 async function importPdf(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
   const extension = path.extname(filePath)
   const sourceCopyPath = path.join(cacheDirectory, `source${extension || '.pdf'}`)
   const pdfBuffer = await fs.readFile(filePath)
   await fs.writeFile(sourceCopyPath, pdfBuffer)
 
-  const pdf = await getPdfDocument({ data: new Uint8Array(pdfBuffer) }).promise
-  const pages: Array<{ pageNumber: number; lines: PdfLine[] }> = []
-  const fontSizes: number[] = []
-  const metadata = await pdf.getMetadata().catch(() => null)
-  const coverImageUrl = await extractPdfCoverImage(pdf, cacheDirectory)
+  // Open the PDF with MuPDF — synchronous after WASM is loaded
+  const doc = mupdf.Document.openDocument(pdfBuffer, 'application/pdf')
+  const pageCount = doc.countPages()
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber)
-    const textContent = await page.getTextContent()
-    const viewport = page.getViewport({ scale: 1 })
-    const lines = collectPdfLines(textContent.items as Array<Record<string, unknown>>, pageNumber, viewport.height)
-    lines.forEach((line) => fontSizes.push(line.fontSize))
-    pages.push({ pageNumber, lines })
+  // ── Cover image: render page 1 (or 2 if blank) at high resolution ──────────
+  const coverImageUrl = renderMuPageAsCover(doc, cacheDirectory)
+
+  // ── Metadata ────────────────────────────────────────────────────────────────
+  const rawTitle = doc.getMetaData(mupdf.Document.META_INFO_TITLE) ?? ''
+  const rawAuthor = doc.getMetaData(mupdf.Document.META_INFO_AUTHOR) ?? ''
+  const fallbackTitle = friendlyFilenameTitle(path.basename(filePath, extension)) || 'Imported PDF'
+
+  // ── Per-page structured text + image extraction ─────────────────────────────
+  const pages: Array<{ pageNumber: number; lines: PdfLine[] }> = []
+  const pageImages: Array<{ pageNumber: number; images: ExtractedPageImage[] }> = []
+  const fontSizes: number[] = []
+
+  for (let i = 0; i < pageCount; i += 1) {
+    const page = doc.loadPage(i)
+    const lines = muPageToLines(page, i + 1)
+    for (const l of lines) fontSizes.push(l.fontSize)
+    pages.push({ pageNumber: i + 1, lines })
+    pageImages.push({ pageNumber: i + 1, images: extractPageImages(page, i + 1, cacheDirectory) })
     await delay()
   }
 
   const baselineFontSize = median(fontSizes)
-  const cleanedPages = filterRepeatedPdfChrome(pages)
-  const pageBlocks = cleanedPages.map(({ pageNumber, lines }) => ({
-    pageNumber,
-    blocks: pdfPageToBlocks(lines, baselineFontSize),
-  }))
 
-  const allBlocks = pageBlocks.flatMap((page) => page.blocks)
-  const hasDetectedHeadings = allBlocks.some((block) => block.type === 'heading')
-  const outlineMap = await extractPdfOutlineMap(pdf)
-  const fallbackTitle = friendlyFilenameTitle(path.basename(filePath, extension)) || 'Imported PDF'
+  // ── Strip running headers/footers ───────────────────────────────────────────
+  const cleanedPages = filterRepeatedPdfChrome(pages)
+
+  // ── Convert lines → semantic blocks, then weave in extracted images ──────────
+  const imagesByPage = new Map(pageImages.map((p) => [p.pageNumber, p.images]))
+  const pageBlocks = cleanedPages.map(({ pageNumber, lines }) => {
+    const textBlocks = pdfLinesToBlocks(lines, baselineFontSize)
+    const imgs = imagesByPage.get(pageNumber) ?? []
+    return {
+      pageNumber,
+      blocks: mergeImageBlocksIntoPage(textBlocks, imgs, lines),
+    }
+  })
+
+  const allBlocks = pageBlocks.flatMap((p) => p.blocks)
+  const hasDetectedHeadings = allBlocks.some((b) => b.type === 'heading')
+
+  // ── Outline (TOC) ────────────────────────────────────────────────────────────
+  const rawOutline = doc.loadOutline() as OutlineItem[] | null
+  const outlineMap = extractOutlineMap(rawOutline)
   const outlinedChapters = buildPdfChaptersFromOutline(pageBlocks, outlineMap, fallbackTitle)
 
+  // ── Assemble chapters: outline → heading split → per-page fallback ──────────
   const chapters: Chapter[] =
     outlinedChapters.length > 0
       ? outlinedChapters
       : hasDetectedHeadings
-        ? splitBlocksIntoChapters(fallbackTitle, ensureReadableBlocks(allBlocks, fallbackTitle))
+        ? splitBlocksIntoChapters(fallbackTitle, ensureReadableBlocks(allBlocks, fallbackTitle), 3)
         : pageBlocks.map(({ pageNumber, blocks }) => ({
             id: createId('chapter'),
             title: `Page ${pageNumber}`,
             content: ensureReadableBlocks(blocks, `Page ${pageNumber}`),
           }))
-  const normalizedChapters = cleanupPdfChapters(chapters, fallbackTitle)
 
-  const info = metadata?.info as Record<string, unknown> | undefined
-  const title = normalizeWhitespace(String(info?.Title ?? fallbackTitle)) || fallbackTitle
-  const author = normalizeWhitespace(String(info?.Author ?? 'PDF import')) || 'PDF import'
+  const normalizedChapters = cleanupPdfChapters(chapters, fallbackTitle)
+  const title = normalizeWhitespace(rawTitle) || fallbackTitle
+  const author = normalizeWhitespace(rawAuthor) || 'PDF import'
 
   return buildDocument({
     id: path.basename(cacheDirectory),
@@ -1318,7 +1004,7 @@ async function importPdf(filePath: string, cacheDirectory: string): Promise<Docu
     sourceType: 'pdf',
     preferredMode: 'page',
     originLabel: filePath,
-    extractedWith: outlineMap.size > 0 ? 'PDF.js outline + text reconstruction' : 'PDF.js semantic reconstruction',
+    extractedWith: outlineMap.size > 0 ? 'MuPDF outline + structured text' : 'MuPDF structured text reconstruction',
     chapters: normalizedChapters,
     metadata: {
       coverImageUrl,
@@ -1874,58 +1560,6 @@ async function importEpub(filePath: string, cacheDirectory: string): Promise<Doc
   })
 }
 
-async function importUrlDocument(url: string, cacheDirectory: string): Promise<DocumentRecord> {
-  const response = await fetchRemoteResource(url)
-
-  if (!response.ok) {
-    throw new Error(`The URL could not be fetched (${response.status}).`)
-  }
-
-  const html = await response.text()
-  const htmlPath = path.join(cacheDirectory, 'source.html')
-  await fs.writeFile(htmlPath, html, 'utf8')
-
-  const { document } = parseHTML(html)
-  const host = new URL(url).hostname.replace(/^www\./, '')
-  const htmlTitle = normalizeWhitespace(document.querySelector('title')?.textContent ?? host)
-  const author =
-    normalizeWhitespace(document.querySelector('meta[name="author"]')?.getAttribute('content') ?? '') || host
-  const coverImageUrl = await extractHtmlCoverImage(document, url, cacheDirectory)
-
-  let markdown: string
-  let extractedWith = 'Summarize CLI extraction'
-  const warnings: string[] = []
-  let blocks: ReaderBlock[] | null = null
-
-  try {
-    markdown = await runSummarizeExtract(url)
-    markdown = await cacheRemoteImagesInMarkdown(markdown, url, cacheDirectory)
-    blocks = ensureReadableBlocks(markdownToBlocks(markdown), htmlTitle)
-  } catch (error) {
-    blocks = ensureReadableBlocks(htmlToBlocks(html), htmlTitle)
-    markdown = blocksToMarkdown(blocks)
-    extractedWith = 'HTML readability fallback'
-    warnings.push(error instanceof Error ? error.message : 'Summarize CLI extraction failed.')
-  }
-
-  await fs.writeFile(path.join(cacheDirectory, 'extracted.md'), markdown, 'utf8')
-
-  return importBlockDocument({
-    cacheDirectory,
-    title: extractTitleFromMarkdown(markdown, htmlTitle),
-    author,
-    description: 'Saved web page extracted into a calm, offline-first reading surface.',
-    sourceType: 'web',
-    preferredMode: 'page',
-    originLabel: url,
-    extractedWith,
-    blocks: ensureReadableBlocks(blocks ?? markdownToBlocks(markdown), htmlTitle),
-    coverImageUrl,
-    note: warnings.length > 0 ? warnings.join(' ') : undefined,
-    warnings,
-  })
-}
-
 export async function importDocumentFromPath(
   filePath: string,
   libraryRoot: string,
@@ -1943,11 +1577,6 @@ export async function importDocumentFromPath(
     return importEpub(filePath, cacheDirectory)
   }
 
-  return importTextLikeFile(filePath, cacheDirectory)
+  throw new Error(`Unsupported file type: ${extension}`)
 }
 
-export async function importDocumentFromUrl(url: string, libraryRoot: string): Promise<DocumentRecord> {
-  const documentId = createId('document')
-  const cacheDirectory = await createCacheDirectory(libraryRoot, documentId)
-  return importUrlDocument(url, cacheDirectory)
-}

@@ -6,7 +6,6 @@ import tailwindcss from '@tailwindcss/vite'
 
 const electronRuntimeDependencies = [
   '@google/gemini-cli-core',
-  '@napi-rs/canvas',
   '@steipete/summarize',
   'ai',
   'ai-sdk-provider-gemini-cli',
@@ -16,7 +15,7 @@ const electronRuntimeDependencies = [
   'fast-xml-parser',
   'jszip',
   'linkedom',
-  'pdfjs-dist/legacy/build/pdf.mjs',
+  'mupdf',
   'web-tree-sitter',
 ]
 

@@ -56,8 +56,7 @@ input {
 
 button:focus-visible,
 input:focus-visible {
-  outline: 2px solid rgba(246, 247, 242, 0.82);
-  outline-offset: 2px;
+  outline: none;
 }
 
 #root {

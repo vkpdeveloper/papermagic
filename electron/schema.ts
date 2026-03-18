@@ -19,6 +19,8 @@ export const chaptersTable = sqliteTable('chapters', {
   title: text('title').notNull(),
   orderIndex: integer('order_index').notNull(),
   contentJson: text('content_json').notNull(),
+  refinedContentJson: text('refined_content_json'),
+  refinementStatus: text('refinement_status').notNull().default('pending'),
 })
 
 export const progressTable = sqliteTable('reading_progress', {
@@ -61,6 +63,8 @@ export const settingsTable = sqliteTable('app_settings', {
   aiProvider: text('ai_provider'),
   aiModel: text('ai_model'),
   aiApiKey: text('ai_api_key'),
+  localAiEnabled: integer('local_ai_enabled', { mode: 'boolean' }).notNull().default(true),
+  ollamaSetupComplete: integer('ollama_setup_complete', { mode: 'boolean' }).notNull().default(false),
 })
 
 export const schema = {
