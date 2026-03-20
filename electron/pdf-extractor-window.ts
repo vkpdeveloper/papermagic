@@ -75,7 +75,7 @@ export function ensureExtractorWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       webSecurity: false, // needed so WebLLM can fetch model shards from CDN in file:// context
-      preload: path.join(__dirname, 'pdf-extractor-preload.mjs'),
+      preload: path.join(__dirname, 'pdf-extractor-preload.js'),
     },
   })
 
