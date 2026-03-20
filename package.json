@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite",
     "start": "tsc --noEmit && vite build --mode production && electron . --no-sandbox",
-    "build:icons": "electron-icon-builder --input papermagic_logo.png --output build/icon --flatten",
+    "build:icons": "mkdir -p build/icon && electron-icon-builder --input papermagic_logo.png --output build/icon --flatten",
     "build": "npm run build:icons && tsc && vite build && electron-builder",
     "build:linux": "npm run build:icons && tsc && vite build && electron-builder --linux",
     "build:mac": "npm run build:icons && tsc && vite build && electron-builder --mac",
