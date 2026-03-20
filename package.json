@@ -11,7 +11,7 @@
     "build:icons": "mkdir -p build/icon && electron-icon-builder --input papermagic_logo.png --output build/icon --flatten",
     "build": "npm run build:icons && tsc && vite build && electron-builder",
     "build:linux": "npm run build:icons && tsc && vite build && electron-builder --linux",
-    "build:mac": "npm run build:icons && tsc && vite build && electron-builder --mac",
+    "build:mac": "npm run build:icons && tsc && vite build && electron-builder --mac --arm64",
     "build:win": "npm run build:icons && tsc && vite build && electron-builder --win",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
