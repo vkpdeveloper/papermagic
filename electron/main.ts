@@ -2,7 +2,6 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createLibraryStore } from './library'
-import { registerExtractorIpcListeners, downloadLocalModel } from './pdf-extractor-window'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -17,22 +16,6 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 let win: BrowserWindow | null
 let libraryStore: ReturnType<typeof createLibraryStore> | null = null
 
-// Enable WebGPU for the hidden PDF extractor window (used by WebLLM / Qwen).
-// Each platform uses a different GPU backend; enable the appropriate one.
-app.commandLine.appendSwitch('enable-unsafe-webgpu')
-if (process.platform === 'linux') {
-  // Linux: Vulkan backend + sandbox workarounds
-  app.commandLine.appendSwitch('no-sandbox')
-  app.commandLine.appendSwitch('disable-setuid-sandbox')
-  app.commandLine.appendSwitch('enable-features', 'Vulkan,UseSkiaRenderer')
-} else if (process.platform === 'darwin') {
-  // macOS: Metal backend (default on Apple Silicon and Intel Macs with Metal support)
-  app.commandLine.appendSwitch('enable-features', 'Metal')
-} else if (process.platform === 'win32') {
-  // Windows: D3D12 backend
-  app.commandLine.appendSwitch('enable-features', 'D3D12')
-}
-
 function createWindow() {
   win = new BrowserWindow({
     title: 'Paper Magic',
@@ -41,7 +24,7 @@ function createWindow() {
     minWidth: 1180,
     minHeight: 760,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.mjs'),
     },
   })
 
@@ -93,10 +76,6 @@ function registerIpcHandlers() {
   ipcMain.handle('paper:save-settings', (_event, settings) => requireStore().saveSettings(settings))
   ipcMain.handle('paper:validate-api-key', (_event, provider, apiKey, modelId) => requireStore().validateApiKey(provider, apiKey, modelId))
   ipcMain.handle('paper:get-provider-models', (_event, provider) => requireStore().getProviderModels(provider))
-  // Local model (WebLLM / Qwen) — triggers pre-download in hidden extractor window
-  ipcMain.handle('paper:download-local-model', () => {
-    downloadLocalModel()
-  })
 }
 
 app.on('window-all-closed', () => {
@@ -113,11 +92,13 @@ app.on('activate', () => {
 })
 
 app.whenReady().then(() => {
-  libraryStore = createLibraryStore(app.getPath('userData'))
-  registerExtractorIpcListeners({
-    onModelReady: () => {
-      // Persist the flag so the Settings page can show the model as ready
-      void requireStore().markLocalModelReady()
+  libraryStore = createLibraryStore(app.getPath('userData'), {
+    onDocumentUpdate: (doc) => {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.webContents.isDestroyed()) {
+          w.webContents.send('paper:document-updated', doc)
+        }
+      }
     },
   })
   registerIpcHandlers()

@@ -36,7 +36,6 @@ export interface LibraryStore {
   removeBookmark: (bookmarkId: string) => Promise<void>
   loadSettings: () => Promise<AppSettings>
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
-  markLocalModelReady: () => Promise<void>
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
 }
@@ -54,7 +53,10 @@ function resolveDocumentCacheDirectory(document: DocumentRecord, libraryRoot: st
   return resolvedCandidate
 }
 
-export function createLibraryStore(userDataPath: string): LibraryStore {
+export function createLibraryStore(
+  userDataPath: string,
+  options?: { onDocumentUpdate?: (doc: DocumentRecord) => void },
+): LibraryStore {
   const context = createDatabaseContext(userDataPath)
 
   const repairUnreadableDocuments = async (): Promise<void> => {
@@ -92,9 +94,42 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
           continue
         }
 
-        const document = await importDocumentFromPath(filePath, context.libraryRoot)
-        upsertDocument(context, document)
-        importedDocuments.push(document)
+        // Resolve with the stub as soon as the first onUpdate fires (cover + title ready),
+        // then continue extraction in the background, streaming each page into the DB.
+        let isFirst = true
+        let resolveStub!: (doc: DocumentRecord) => void
+        let rejectStub!: (err: unknown) => void
+        const stubPromise = new Promise<DocumentRecord>((resolve, reject) => {
+          resolveStub = resolve
+          rejectStub = reject
+        })
+
+        void importDocumentFromPath(filePath, context.libraryRoot, {
+          onUpdate: (doc) => {
+            upsertDocument(context, doc)
+            if (isFirst) {
+              isFirst = false
+              resolveStub(doc)
+            } else {
+              options?.onDocumentUpdate?.(doc)
+            }
+          },
+        }).then((finalDoc) => {
+          upsertDocument(context, finalDoc)
+          options?.onDocumentUpdate?.(finalDoc)
+        }).catch((err) => {
+          if (isFirst) {
+            isFirst = false
+            rejectStub(err)
+          }
+        })
+
+        try {
+          const stub = await stubPromise
+          importedDocuments.push(stub)
+        } catch {
+          // Import failed before producing any content — skip silently
+        }
       }
 
       return importedDocuments
@@ -140,10 +175,6 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
     },
     loadSettings: async () => loadSettings(context),
     saveSettings: async (settings) => saveSettings(context, settings),
-    markLocalModelReady: async () => {
-      const current = loadSettings(context)
-      saveSettings(context, { ...current, localAiModelReady: true })
-    },
     validateApiKey: async (provider, apiKey, modelId) => validateApiKey(provider, apiKey, modelId),
     getProviderModels: async (provider) => PROVIDER_MODELS[provider] ?? [],
   }

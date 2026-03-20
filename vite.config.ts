@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite'
-import path from 'node:path'
 import electron from 'vite-plugin-electron'
 import renderer from 'vite-plugin-electron-renderer'
 import react from '@vitejs/plugin-react'
@@ -17,19 +16,20 @@ const electronRuntimeDependencies = [
   'web-tree-sitter',
 ]
 
-// https://vitejs.dev/config/
-export default defineConfig({
-  // Multi-page renderer build: main app + hidden PDF extractor window.
-  // This ensures src/pdf-extractor-worker.ts is bundled by Vite so
-  // bare module imports (e.g. 'extract2md') resolve correctly at runtime.
+// Preload vite config: force CJS output with .mjs extension so Electron
+// can load the scripts regardless of the package.json "type": "module" setting.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const preloadViteConfig: any = {
   build: {
-    rollupOptions: {
-      input: {
-        index: path.join(__dirname, 'index.html'),
-        'pdf-extractor': path.join(__dirname, 'pdf-extractor.html'),
-      },
+    lib: {
+      formats: ['cjs'],
+      fileName: () => '[name].mjs',
     },
   },
+}
+
+// https://vitejs.dev/config/
+export default defineConfig({
   plugins: [
     tailwindcss(),
     react(),
@@ -47,9 +47,7 @@ export default defineConfig({
       },
       {
         entry: 'electron/preload.ts',
-      },
-      {
-        entry: 'electron/pdf-extractor-preload.ts',
+        vite: preloadViteConfig,
       },
     ]),
     // Polyfill the Electron and Node.js API for Renderer process.

@@ -789,6 +789,22 @@ function App() {
     }
   }, [activeDocumentId, persistedState])
 
+  // Stream page-by-page updates as the document is extracted in the background
+  useEffect(() => {
+    window.paperMagic.onDocumentUpdated((doc) => {
+      setPersistedState((prev) => {
+        if (!prev) return prev
+        const exists = prev.documents.some((d) => d.id === doc.id)
+        return {
+          ...prev,
+          documents: exists
+            ? prev.documents.map((d) => (d.id === doc.id ? doc : d))
+            : [doc, ...prev.documents],
+        }
+      })
+    })
+  }, [])
+
   useEffect(() => {
     setExpandedTocChapters([])
   }, [activeDocumentId])
@@ -2257,6 +2273,7 @@ function App() {
                 </button>
               </div>
             ) : null}
+
 
             <div
               className={activeDocument.sourceType === 'pdf'

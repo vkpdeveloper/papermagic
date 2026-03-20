@@ -127,7 +127,6 @@ export interface AppSettings {
   aiProvider: AiProvider | null
   aiModel: string | null
   aiApiKey: string | null
-  localAiModelReady: boolean
 }
 
 export interface PaperMagicApi {
@@ -146,8 +145,6 @@ export interface PaperMagicApi {
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
-  // Local AI (WebLLM / Qwen) — model pre-download
-  downloadLocalModel: () => Promise<void>
-  onLocalModelProgress: (callback: (progress: { stage: string; message: string; progress?: number; error?: string }) => void) => void
-  onLocalModelReady: (callback: () => void) => void
+  // Real-time document updates during extraction (page-by-page streaming)
+  onDocumentUpdated: (callback: (doc: DocumentRecord) => void) => void
 }

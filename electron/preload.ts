@@ -17,12 +17,8 @@ const api: PaperMagicApi = {
   saveSettings: (settings) => ipcRenderer.invoke('paper:save-settings', settings),
   validateApiKey: (provider, apiKey, modelId) => ipcRenderer.invoke('paper:validate-api-key', provider, apiKey, modelId),
   getProviderModels: (provider) => ipcRenderer.invoke('paper:get-provider-models', provider),
-  downloadLocalModel: () => ipcRenderer.invoke('paper:download-local-model'),
-  onLocalModelProgress: (callback) => {
-    ipcRenderer.on('paper:local-model-progress', (_event, progress) => callback(progress))
-  },
-  onLocalModelReady: (callback) => {
-    ipcRenderer.on('paper:local-model-ready', () => callback())
+  onDocumentUpdated: (callback) => {
+    ipcRenderer.on('paper:document-updated', (_event, doc) => callback(doc))
   },
 }
 

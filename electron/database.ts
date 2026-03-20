@@ -689,7 +689,6 @@ const defaultSettings: AppSettings = {
   aiProvider: null,
   aiModel: null,
   aiApiKey: null,
-  localAiModelReady: false,
 };
 
 export function loadSettings(context: DatabaseContext): AppSettings {
@@ -708,7 +707,6 @@ export function loadSettings(context: DatabaseContext): AppSettings {
     aiProvider: (row.aiProvider as AppSettings["aiProvider"]) ?? null,
     aiModel: row.aiModel ?? null,
     aiApiKey: row.aiApiKey ?? null,
-    localAiModelReady: row.localAiModelReady ?? false,
   };
 }
 
@@ -724,7 +722,6 @@ export function saveSettings(
       aiProvider: settings.aiProvider ?? null,
       aiModel: settings.aiModel ?? null,
       aiApiKey: settings.aiApiKey ?? null,
-      localAiModelReady: settings.localAiModelReady ?? false,
     })
     .onConflictDoUpdate({
       target: settingsTable.id,
@@ -733,7 +730,6 @@ export function saveSettings(
         aiProvider: settings.aiProvider ?? null,
         aiModel: settings.aiModel ?? null,
         aiApiKey: settings.aiApiKey ?? null,
-        localAiModelReady: settings.localAiModelReady ?? false,
       },
     })
     .run();

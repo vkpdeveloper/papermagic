@@ -10,11 +10,9 @@ import {
   UNREADABLE_IMPORT_MESSAGE,
   buildDocument,
   createId,
-  markdownToBlocks,
   splitBlocksIntoChapters,
 } from '../src/content'
 import type { Chapter, DocumentRecord, ReaderBlock } from '../src/types'
-import { extractPdfToMarkdown } from './pdf-extractor-window'
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -341,7 +339,11 @@ function extractOutlineEntries(outline: OutlineItem[] | null): OutlineEntry[] {
 // Render scale for page images: 1.8× gives ~130 DPI for a US-letter page (~1530px wide)
 const PDF_RENDER_SCALE = 1.8
 
-export async function importPdfAsImages(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
+export async function importPdfAsImages(
+  filePath: string,
+  cacheDirectory: string,
+  onUpdate?: (doc: DocumentRecord) => void,
+): Promise<DocumentRecord> {
   const extension = path.extname(filePath)
   const sourceCopyPath = path.join(cacheDirectory, `source${extension || '.pdf'}`)
   const pdfBuffer = await fs.readFile(filePath)
@@ -357,9 +359,60 @@ export async function importPdfAsImages(filePath: string, cacheDirectory: string
   const rawTitle = doc.getMetaData(mupdf.Document.META_INFO_TITLE) ?? ''
   const rawAuthor = doc.getMetaData(mupdf.Document.META_INFO_AUTHOR) ?? ''
   const fallbackTitle = friendlyFilenameTitle(path.basename(filePath, extension)) || 'Imported PDF'
+  const title = normalizeWhitespace(rawTitle) || fallbackTitle
+  const author = normalizeWhitespace(rawAuthor) || 'PDF import'
+  const importedAt = new Date().toISOString()
+  const docId = path.basename(cacheDirectory)
+
+  // Extract outline before rendering pages so we can pre-allocate stable chapter IDs for streaming
+  const rawOutline = doc.loadOutline() as OutlineItem[] | null
+  const outlineEntries = extractOutlineEntries(rawOutline)
+  const outlineMap = new Map(outlineEntries.map((e) => [e.page, e]))
+  const depthByPage = new Map(outlineEntries.map((e) => [e.page, e.depth]))
+
+  // Pre-allocate chapters with stable IDs using the same boundary logic as the final build.
+  // A new chapter starts at page 1 and at every page that has an outline entry.
+  type StreamChapter = Chapter & { startPage: number }
+  const streamChapters: StreamChapter[] = []
+  for (let p = 1; p <= pageCount; p++) {
+    const entry = outlineEntries.length > 0 ? outlineMap.get(p) : undefined
+    const isChapterStart = streamChapters.length === 0 || !!entry
+    if (isChapterStart) {
+      streamChapters.push({
+        id: createId('chapter'),
+        title: entry?.title ?? (streamChapters.length === 0 ? fallbackTitle : `Section ${streamChapters.length + 1}`),
+        content: [],
+        outlineDepth: entry ? (depthByPage.get(p) ?? 0) : 0,
+        startPage: p,
+      })
+    }
+  }
+  if (streamChapters.length === 0) {
+    streamChapters.push({ id: createId('chapter'), title: fallbackTitle, content: [], outlineDepth: 0, startPage: 1 })
+  }
+
+  const buildCurrentDoc = () => {
+    const chapters = streamChapters
+      .filter((c) => c.content.length > 0)
+      .map(({ startPage: _startPage, ...c }) => c)
+    return buildDocument({
+      id: docId,
+      title,
+      author,
+      description: 'PDF rendered as page images.',
+      sourceType: 'pdf',
+      preferredMode: 'scroll',
+      originLabel: filePath,
+      extractedWith: 'MuPDF image rendering',
+      chapters,
+      metadata: { importedAt, coverImageUrl, sourcePath: filePath, cacheDirectory },
+    })
+  }
+
+  // Send initial stub (cover + title visible, no pages yet)
+  if (onUpdate) onUpdate(buildCurrentDoc())
 
   // Render each page as a JPEG image
-  const pageBlocks: ReaderBlock[] = []
   for (let i = 0; i < pageCount; i++) {
     const page = doc.loadPage(i)
     const bounds = page.getBounds()
@@ -371,71 +424,28 @@ export async function importPdfAsImages(filePath: string, cacheDirectory: string
     const fileName = `page-${String(i + 1).padStart(4, '0')}.jpg`
     const imagePath = path.join(cacheDirectory, fileName)
     fsSync.writeFileSync(imagePath, jpegBytes)
-    pageBlocks.push({
+    const block: ReaderBlock = {
       id: createId('block'),
       type: 'pdf-page',
       src: pathToFileURL(imagePath).toString(),
       pageNumber: i + 1,
       pageWidth,
       pageHeight,
-    })
+    }
+
+    // Assign block to its pre-allocated chapter (last chapter whose startPage <= current page)
+    let targetChapter = streamChapters[0]
+    for (const c of streamChapters) {
+      if (c.startPage <= i + 1) targetChapter = c
+      else break
+    }
+    targetChapter.content.push(block)
+
+    if (onUpdate) onUpdate(buildCurrentDoc())
     await delay()
   }
 
-  // Build chapters from PDF outline, or fall back to one chapter for all pages
-  const rawOutline = doc.loadOutline() as OutlineItem[] | null
-  const outlineEntries = extractOutlineEntries(rawOutline)
-
-  let chapters: Chapter[]
-  if (outlineEntries.length > 0) {
-    const depthByPage = new Map(outlineEntries.map((e) => [e.page, e.depth]))
-    chapters = []
-    let currentChapter: Chapter | null = null
-    const outlineMap = new Map(outlineEntries.map((e) => [e.page, e]))
-
-    for (const block of pageBlocks) {
-      const pageNum = block.pageNumber!
-      const entry = outlineMap.get(pageNum)
-      if (!currentChapter || entry) {
-        if (currentChapter) chapters.push(currentChapter)
-        currentChapter = {
-          id: createId('chapter'),
-          title: entry?.title ?? (chapters.length === 0 ? fallbackTitle : `Section ${chapters.length + 1}`),
-          content: [block],
-          outlineDepth: entry ? (depthByPage.get(pageNum) ?? 0) : 0,
-        }
-      } else {
-        currentChapter.content.push(block)
-      }
-    }
-    if (currentChapter) chapters.push(currentChapter)
-  } else {
-    chapters = [{
-      id: createId('chapter'),
-      title: fallbackTitle,
-      content: pageBlocks,
-    }]
-  }
-
-  const title = normalizeWhitespace(rawTitle) || fallbackTitle
-  const author = normalizeWhitespace(rawAuthor) || 'PDF import'
-
-  return buildDocument({
-    id: path.basename(cacheDirectory),
-    title,
-    author,
-    description: 'PDF rendered as page images.',
-    sourceType: 'pdf',
-    preferredMode: 'scroll',
-    originLabel: filePath,
-    extractedWith: 'MuPDF image rendering',
-    chapters,
-    metadata: {
-      coverImageUrl,
-      sourcePath: filePath,
-      cacheDirectory,
-    },
-  })
+  return buildCurrentDoc()
 }
 
 
@@ -1038,96 +1048,18 @@ async function importEpub(filePath: string, cacheDirectory: string): Promise<Doc
   })
 }
 
-// ─── New PDF importer: text extraction via WebLLM (Qwen) ─────────────────────
-
-/**
- * Import a PDF by extracting its text content as Markdown using
- * Extract2MD + WebLLM (Qwen3-0.6B) running in a hidden renderer window.
- *
- * The resulting document has rich text blocks (headings, paragraphs, code,
- * tables, etc.) instead of page images, giving a proper reading experience
- * with selectable/searchable text.
- *
- * Falls back gracefully: if extraction fails, the error is re-thrown so the
- * caller can decide whether to use importPdfAsImages instead.
- */
-async function importPdfAsMarkdown(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
-  const extension = path.extname(filePath)
-  const sourceCopyPath = path.join(cacheDirectory, `source${extension || '.pdf'}`)
-  const pdfBuffer = await fs.readFile(filePath)
-  await fs.writeFile(sourceCopyPath, pdfBuffer)
-
-  // We still open with MuPDF to get the cover thumbnail and metadata cheaply —
-  // we don't rasterize any content pages.
-  const doc = mupdf.Document.openDocument(pdfBuffer, 'application/pdf')
-  const coverImageUrl = renderMuPageAsCover(doc, cacheDirectory)
-
-  const rawTitle = doc.getMetaData(mupdf.Document.META_INFO_TITLE) ?? ''
-  const rawAuthor = doc.getMetaData(mupdf.Document.META_INFO_AUTHOR) ?? ''
-  const fallbackTitle = friendlyFilenameTitle(path.basename(filePath, extension)) || 'Imported PDF'
-
-  // Send the PDF to the hidden extractor window for WebLLM-based text extraction
-  const pdfBase64 = pdfBuffer.toString('base64')
-  const markdown = await extractPdfToMarkdown(pdfBase64)
-
-  // Parse the returned Markdown into structured blocks
-  const blocks = markdownToBlocks(markdown)
-  const chapters = splitBlocksIntoChapters(
-    fallbackTitle,
-    blocks.length > 0 ? blocks : [
-      {
-        id: createId('block'),
-        type: 'heading',
-        level: 2,
-        text: fallbackTitle,
-      },
-      {
-        id: createId('block'),
-        type: 'paragraph',
-        text: UNREADABLE_IMPORT_MESSAGE,
-      },
-    ],
-  )
-
-  const title = normalizeWhitespace(rawTitle) || fallbackTitle
-  const author = normalizeWhitespace(rawAuthor) || 'PDF import'
-
-  return buildDocument({
-    id: path.basename(cacheDirectory),
-    title,
-    author,
-    description: 'PDF text extracted via WebLLM (Qwen).',
-    sourceType: 'pdf',
-    preferredMode: 'page',
-    originLabel: filePath,
-    extractedWith: 'Extract2MD + Qwen (WebLLM)',
-    chapters,
-    metadata: {
-      coverImageUrl,
-      sourcePath: filePath,
-      cacheDirectory,
-    },
-  })
-}
 
 export async function importDocumentFromPath(
   filePath: string,
   libraryRoot: string,
-  options?: { documentId?: string },
+  options?: { documentId?: string; onUpdate?: (doc: DocumentRecord) => void },
 ): Promise<DocumentRecord> {
   const extension = path.extname(filePath).toLowerCase()
   const documentId = options?.documentId ?? createId('document')
   const cacheDirectory = await createCacheDirectory(libraryRoot, documentId)
 
   if (extension === '.pdf') {
-    // Try the new WebLLM-based markdown extraction first.
-    // If it fails (model not downloaded yet, WebGPU unavailable, etc.),
-    // fall back transparently to the original image rendering path.
-    try {
-      return await importPdfAsMarkdown(filePath, cacheDirectory)
-    } catch {
-      return importPdfAsImages(filePath, cacheDirectory)
-    }
+    return importPdfAsImages(filePath, cacheDirectory, options?.onUpdate)
   }
 
   if (extension === '.epub') {
