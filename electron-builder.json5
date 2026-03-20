@@ -27,13 +27,15 @@
   ],
   "mac": {
     "target": [
-      "dmg"
+      {
+        "target": "dmg",
+        "arch": [
+          "arm64"
+        ]
+      }
     ],
     "icon": "build/icon/icons/icon.icns",
-    "artifactName": "${productName}-Mac-${version}-${arch}.${ext}",
-    "arch": [
-      "arm64"
-    ]
+    "artifactName": "${productName}-Mac-${version}-${arch}.${ext}"
   },
   "win": {
     "icon": "build/icon/icons/icon.ico",
