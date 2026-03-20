@@ -30,7 +30,10 @@
       "dmg"
     ],
     "icon": "build/icon/icons/icon.icns",
-    "artifactName": "${productName}-Mac-${version}-Installer.${ext}"
+    "artifactName": "${productName}-Mac-${version}-${arch}.${ext}",
+    "arch": [
+      "arm64"
+    ]
   },
   "win": {
     "icon": "build/icon/icons/icon.ico",
