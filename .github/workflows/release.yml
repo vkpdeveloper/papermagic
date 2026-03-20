@@ -21,9 +21,6 @@ jobs:
           - runner: macos-15
             build_cmd: npm run build:mac
             artifact_pattern: "*.dmg"
-          - runner: windows-latest
-            build_cmd: npm run build:win
-            artifact_pattern: "*.exe"
 
     runs-on: ${{ matrix.runner }}
     env:
@@ -84,6 +81,5 @@ jobs:
           files: |
             **/*.AppImage
             **/*.dmg
-            **/*.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
