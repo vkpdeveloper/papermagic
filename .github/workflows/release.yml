@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -15,13 +15,13 @@ jobs:
         include:
           - os: ubuntu-latest
             build_cmd: npm run build:linux
-            artifact_pattern: '*.AppImage'
-          - os: macos-latest
+            artifact_pattern: "*.AppImage"
+          - os: macos-14
             build_cmd: npm run build:mac
-            artifact_pattern: '*.dmg'
+            artifact_pattern: "*.dmg"
           - os: windows-latest
             build_cmd: npm run build:win
-            artifact_pattern: '*.exe'
+            artifact_pattern: "*.exe"
 
     runs-on: ${{ matrix.os }}
 
@@ -32,8 +32,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm install
