@@ -21,19 +21,24 @@ import {
   NotebookPen as NotebookPenIcon,
   PanelLeftClose as PanelLeftCloseIcon,
   PanelLeftOpen as PanelLeftOpenIcon,
-  Loader2 as Loader2Icon,
   Search as SearchIcon,
   Settings as SettingsIcon,
   Upload as UploadIcon,
   X as XIcon,
+  Columns2 as Columns2Icon,
+  LayoutTemplate as LayoutSingleIcon,
+  ZoomIn as ZoomInIcon,
+  ZoomOut as ZoomOutIcon,
+  Moon as MoonIcon,
+  Sun as SunIcon,
+  RotateCcw as FitWidthIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { buildSearchResults, buildToc, isUtilityHeading } from './content'
+import { buildSearchResults, isUtilityHeading } from './content'
 import { defaultPreferences } from './storage'
 import type {
   AppMode,
   Bookmark,
-  ChapterRefinementUpdate,
   DocumentRecord,
   Highlight,
   PersistedState,
@@ -52,11 +57,11 @@ import { ImageLightbox } from './components/ImageLightbox'
 import { SelectionPopover } from './components/SelectionPopover'
 import { ReaderSearchBar } from './components/ReaderSearchBar'
 import { SettingsPage } from './components/SettingsPage'
-import { OllamaOnboarding } from './components/OllamaOnboarding'
 import { Button } from './components/ui/Button'
 import { Input } from './components/ui/Input'
 import { Tooltip, TooltipProvider } from './components/ui/Tooltip'
 import { ContextMenu } from './components/ui/ContextMenu'
+import { Spinner } from './components/ui/Spinner'
 
 type ReaderPanel = 'toc' | 'notes' | null
 
@@ -386,6 +391,115 @@ function InlineMd({ text }: { text: string }) {
   )
 }
 
+// ─── PDF page image block with lazy render and dark mode inversion ────────────
+
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b)
+  const l = (max + min) / 2
+  if (max === min) return [0, 0, l]
+  const d = max - min
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+  let h = 0
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6
+  else if (max === g) h = ((b - r) / d + 2) / 6
+  else h = ((r - g) / d + 4) / 6
+  return [h, s, l]
+}
+
+function hue2rgb(p: number, q: number, t: number): number {
+  if (t < 0) t += 1
+  if (t > 1) t -= 1
+  if (t < 1/6) return p + (q - p) * 6 * t
+  if (t < 1/2) return q
+  if (t < 2/3) return p + (q - p) * (2/3 - t) * 6
+  return p
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  if (s === 0) return [l, l, l]
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+  const p = 2 * l - q
+  return [hue2rgb(p, q, h + 1/3), hue2rgb(p, q, h), hue2rgb(p, q, h - 1/3)]
+}
+
+const darkModeCache = new Map<string, string>()
+
+function invertLuminance(src: string): Promise<string> {
+  if (darkModeCache.has(src)) return Promise.resolve(darkModeCache.get(src)!)
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.src = src
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = img.naturalWidth
+      canvas.height = img.naturalHeight
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(img, 0, 0)
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      const d = imageData.data
+      for (let i = 0; i < d.length; i += 4) {
+        const [h, s, l] = rgbToHsl(d[i] / 255, d[i + 1] / 255, d[i + 2] / 255)
+        const [nr, ng, nb] = hslToRgb(h, s, 1 - l)
+        d[i] = nr * 255; d[i + 1] = ng * 255; d[i + 2] = nb * 255
+      }
+      ctx.putImageData(imageData, 0, 0)
+      const result = canvas.toDataURL('image/jpeg', 0.9)
+      darkModeCache.set(src, result)
+      resolve(result)
+    }
+    img.onerror = () => resolve(src)
+  })
+}
+
+function PdfPageBlock({ block, chapterId, isDarkMode }: { block: ReaderBlock; chapterId: string; isDarkMode: boolean }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [isVisible, setIsVisible] = useState(false)
+  const [darkSrc, setDarkSrc] = useState<string | null>(null)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { setIsVisible(true); observer.disconnect() } },
+      { rootMargin: '800px 0px' },
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!isVisible || !isDarkMode || !block.src) return
+    void invertLuminance(block.src).then(setDarkSrc)
+  }, [isVisible, isDarkMode, block.src])
+
+  const aspectRatio = block.pageWidth && block.pageHeight
+    ? block.pageWidth / block.pageHeight
+    : 0.7727
+
+  const displaySrc = isDarkMode && darkSrc ? darkSrc : block.src
+
+  return (
+    <div
+      ref={containerRef}
+      data-block-id={block.id}
+      data-chapter-id={chapterId}
+      className="w-full"
+      style={{ aspectRatio: String(aspectRatio) }}
+    >
+      {isVisible && displaySrc ? (
+        <img
+          src={displaySrc}
+          alt={`Page ${block.pageNumber ?? ''}`}
+          className="w-full h-auto block"
+          draggable={false}
+        />
+      ) : (
+        <div className="w-full h-full bg-white/[0.03] animate-pulse" />
+      )}
+    </div>
+  )
+}
+
 const ReaderBlockView = memo(function ReaderBlockView(props: {
   block: ReaderBlock
   chapterId: string
@@ -394,8 +508,9 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
   searchQuery?: string
   activeSearchBlockId?: string
   onPreviewImage?: (image: ImagePreviewState) => void
+  pdfDarkMode?: boolean
 }) {
-  const { block, chapterId, documentId, highlights, searchQuery = '', activeSearchBlockId, onPreviewImage } = props
+  const { block, chapterId, documentId, highlights, searchQuery = '', activeSearchBlockId, onPreviewImage, pdfDarkMode = false } = props
 
   function renderText(text: string) {
     const withHighlights = renderWithHighlights(text, highlights, documentId, block.id)
@@ -421,34 +536,48 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
   const hasSearch = Boolean(searchQuery.trim())
 
   switch (block.type) {
-    case 'heading':
+    case 'heading': {
       if (isUtilityHeading(block.text ?? '')) {
         return null
       }
 
+      const headingConfig: Record<number, { tag: string; size: string; mt: string }> = {
+        1: { tag: 'h1', size: 'text-[1.55em]', mt: 'mt-[3em]' },
+        2: { tag: 'h2', size: 'text-[1.3em]', mt: 'mt-[2.6em]' },
+        3: { tag: 'h3', size: 'text-[1.12em]', mt: 'mt-[2.4em]' },
+        4: { tag: 'h4', size: 'text-[0.97em]', mt: 'mt-[1.8em]' },
+        5: { tag: 'h5', size: 'text-[0.9em]', mt: 'mt-[1.6em]' },
+        6: { tag: 'h6', size: 'text-[0.85em]', mt: 'mt-[1.4em]' },
+      }
+      const hc = headingConfig[block.level ?? 3] ?? headingConfig[3]
+      const HeadingTag = hc.tag as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
+
       return (
-        <h3
-          className={`${blockBase} mt-[2.4em] mb-[0.9em] font-display font-semibold leading-[1.18]`}
+        <HeadingTag
+          className={`${blockBase} ${hc.mt} mb-[0.9em] ${hc.size} font-display font-semibold leading-[1.18]`}
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
           {hasHighlights || hasSearch ? renderText(block.text ?? '') : <InlineMd text={block.text ?? ''} />}
-        </h3>
+        </HeadingTag>
       )
+    }
     case 'quote':
       return (
         <blockquote
-          className={`${blockBase} pl-[18px] border-l border-border-strong text-text-secondary`}
+          className={`${blockBase} pl-5 border-l-2 border-border-strong text-text-secondary italic`}
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
           {hasHighlights || hasSearch ? renderText(block.text ?? '') : <InlineMd text={block.text ?? ''} />}
         </blockquote>
       )
-    case 'list':
+    case 'list': {
+      const ListTag = block.ordered ? 'ol' : 'ul'
+      const listStyle = block.ordered ? 'list-decimal' : 'list-disc'
       return (
-        <ul
-          className={`${blockBase} pl-[1.2em]`}
+        <ListTag
+          className={`${blockBase} ${listStyle} pl-[1.6em] space-y-[0.35em]`}
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
@@ -457,8 +586,9 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
               {hasHighlights || hasSearch ? item : <InlineMd text={item} />}
             </li>
           ))}
-        </ul>
+        </ListTag>
       )
+    }
     case 'code':
       return (
         <div
@@ -513,7 +643,7 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
         >
           <button
             type="button"
-            className="block w-full p-0 border-0 bg-transparent cursor-zoom-in outline-none"
+            className="flex justify-center w-full p-0 border-0 bg-transparent cursor-zoom-in outline-none"
             onClick={() =>
               block.src
                 ? onPreviewImage?.({
@@ -529,13 +659,22 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
               loading="eager"
               src={block.src}
               alt={block.alt ?? block.caption ?? 'Imported image'}
-              className="w-full max-h-[min(60vh,520px)] object-contain"
+              className="mx-auto block max-w-full max-h-[min(60vh,520px)] object-contain"
             />
           </button>
           {block.caption ? (
-            <figcaption className="mt-2 text-text-muted text-[0.9em]">{block.caption}</figcaption>
+            <figcaption className="mt-2 text-text-muted text-[0.82em] text-center">{block.caption}</figcaption>
           ) : null}
         </figure>
+      )
+    case 'pdf-page':
+      return (
+        <PdfPageBlock
+          key={block.id}
+          block={block}
+          chapterId={chapterId}
+          isDarkMode={pdfDarkMode}
+        />
       )
     default: {
       const text = block.text ?? ''
@@ -553,7 +692,7 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
       }
       return (
         <p
-          className={blockBase}
+          className={`${blockBase} tracking-[0.01em]`}
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
@@ -573,8 +712,10 @@ function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [isImporting, setIsImporting] = useState(false)
   const [deletingDocumentIds, setDeletingDocumentIds] = useState<string[]>([])
-  const [refiningDocumentIds, setRefiningDocumentIds] = useState<Set<string>>(new Set())
   const [isDragging, setIsDragging] = useState(false)
+  const [pdfTwoPage, setPdfTwoPage] = useState(false)
+  const [pdfDarkMode, setPdfDarkMode] = useState(false)
+  const [pdfZoom, setPdfZoom] = useState(100) // percentage, 50–200
   const [librarySearchQuery, setLibrarySearchQuery] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [isReaderSearchOpen, setIsReaderSearchOpen] = useState(false)
@@ -586,7 +727,6 @@ function App() {
   const [expandedTocChapters, setExpandedTocChapters] = useState<string[]>([])
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [showOnboarding, setShowOnboarding] = useState(false)
   const readerRef = useRef<HTMLDivElement | null>(null)
   const progressSaveTimerRef = useRef<number | null>(null)
   const preferenceSaveTimerRef = useRef<number | null>(null)
@@ -601,19 +741,13 @@ function App() {
 
     const bootstrap = async () => {
       try {
-        const [state, refiningIds] = await Promise.all([
-          window.paperMagic.loadState(),
-          window.paperMagic.getRefiningDocumentIds(),
-        ])
+        const state = await window.paperMagic.loadState()
         if (cancelled) {
           return
         }
 
         setPersistedState(state)
         setActiveDocumentId((current) => current ?? state.documents[0]?.id ?? null)
-        if (refiningIds.length > 0) {
-          setRefiningDocumentIds(new Set(refiningIds))
-        }
       } catch (error) {
         if (cancelled) {
           return
@@ -659,87 +793,6 @@ function App() {
     setExpandedTocChapters([])
   }, [activeDocumentId])
 
-  // Show onboarding if Ollama setup hasn't run yet
-  useEffect(() => {
-    void window.paperMagic.getOllamaStatus().then((status) => {
-      // If status is checking/installing/pulling, onboarding is in progress
-      if (['checking', 'installing', 'pulling', 'starting'].includes(status.status)) {
-        setShowOnboarding(true)
-      }
-    })
-
-    // Also show onboarding if we receive a non-ready/non-idle progress event right after boot
-    const unsub = window.paperMagic.onOllamaProgress((progress) => {
-      if (['checking', 'installing', 'pulling', 'starting'].includes(progress.status)) {
-        setShowOnboarding(true)
-      }
-    })
-    return unsub
-  }, [])
-
-  // Track which chapters have been refined mid-session so page-reset effect
-  // can skip resetting position when only content changed (not document switch).
-  const refinedChapterIdsRef = useRef<Set<string>>(new Set())
-  // Track per-document refinement progress: documentId → count of completed chapters
-  const docRefinementCountRef = useRef<Map<string, number>>(new Map())
-
-  // Listen for chapter refinement updates and swap content in state
-  useEffect(() => {
-    const unsub = window.paperMagic.onChapterRefined((update: ChapterRefinementUpdate) => {
-      refinedChapterIdsRef.current.add(update.chapterId)
-
-      // Ensure the doc appears as refining (handles rerun case too).
-      // If it wasn't already tracked, reset its completion counter (new run).
-      setRefiningDocumentIds((prev) => {
-        if (prev.has(update.documentId)) return prev
-        docRefinementCountRef.current.set(update.documentId, 0)
-        const next = new Set(prev)
-        next.add(update.documentId)
-        return next
-      })
-
-      // Track completion to remove doc from refining set when all chapters done
-      const prevCount = docRefinementCountRef.current.get(update.documentId) ?? 0
-      docRefinementCountRef.current.set(update.documentId, prevCount + 1)
-
-      // Use startTransition so the content swap is low-priority and doesn't
-      // interrupt the user's current interaction/scroll.
-      startTransition(() => {
-        setPersistedState((current) => {
-          if (!current) return current
-          const updatedDocs = current.documents.map((doc) => {
-            if (doc.id !== update.documentId) return doc
-            const updatedChapters = doc.chapters.map((ch) =>
-              ch.id === update.chapterId ? { ...ch, content: update.refinedContent } : ch
-            )
-            // Rebuild TOC so navigation reflects refined headings
-            return {
-              ...doc,
-              chapters: updatedChapters,
-              toc: buildToc(updatedChapters),
-            }
-          })
-
-          // Remove from refining set if all chapters for this doc are resolved
-          const doc = updatedDocs.find((d) => d.id === update.documentId)
-          if (doc) {
-            const completedCount = docRefinementCountRef.current.get(update.documentId) ?? 0
-            if (completedCount >= doc.chapters.length) {
-              docRefinementCountRef.current.delete(update.documentId)
-              setRefiningDocumentIds((prev) => {
-                const next = new Set(prev)
-                next.delete(update.documentId)
-                return next
-              })
-            }
-          }
-
-          return { ...current, documents: updatedDocs }
-        })
-      })
-    })
-    return unsub
-  }, [])
 
   const commitProgress = useCallback((progress: ReadingProgress) => {
     startTransition(() => {
@@ -907,15 +960,7 @@ function App() {
       return
     }
 
-    // If the document identity didn't change (only chapter content was refined),
-    // skip the position reset so reading position is preserved mid-refinement.
-    if (prevDocumentIdRef.current === activeDocument.id && refinedChapterIdsRef.current.size > 0) {
-      refinedChapterIdsRef.current.clear()
-      return
-    }
-
     prevDocumentIdRef.current = activeDocument.id
-    refinedChapterIdsRef.current.clear()
   }, [activeDocument])
 
   useLayoutEffect(() => {
@@ -955,6 +1000,9 @@ function App() {
     setSearchQuery('')
     setSelectionDraft(null)
     setPreviewImage(null)
+    setPdfZoom(100)
+    setPdfTwoPage(false)
+    setPdfDarkMode(false)
 
     const existingProgress = persistedState.progress.find((progress) => progress.documentId === documentId)
     const fallbackBlock = document.chapters[0]?.content[0]
@@ -1533,6 +1581,48 @@ function App() {
     { enabled: readerHotkeysEnabled },
   )
 
+  const isPdfReader = readerHotkeysEnabled && activeDocument?.sourceType === 'pdf'
+
+  // PDF zoom: Ctrl/Cmd + minus / equals(plus)
+  useHotkey(
+    'Mod+-',
+    () => { setPdfZoom((z) => Math.max(50, z - 10)) },
+    { enabled: isPdfReader },
+  )
+
+  useHotkey(
+    'Mod+=',
+    () => { setPdfZoom((z) => Math.min(200, z + 10)) },
+    { enabled: isPdfReader },
+  )
+
+  useHotkey(
+    { key: '=', shift: true, mod: true },
+    () => { setPdfZoom((z) => Math.min(200, z + 10)) },
+    { enabled: isPdfReader },
+  )
+
+  // Ctrl/Cmd+0: reset zoom to 100%
+  useHotkey(
+    'Mod+0',
+    () => { setPdfZoom(100) },
+    { enabled: isPdfReader },
+  )
+
+  // D: toggle dark mode (invert)
+  useHotkey(
+    'D',
+    () => { setPdfDarkMode((v) => !v) },
+    { enabled: isPdfReader },
+  )
+
+  // P: toggle two-page spread
+  useHotkey(
+    'P',
+    () => { setPdfTwoPage((v) => !v) },
+    { enabled: isPdfReader },
+  )
+
   useHotkeySequence(
     ['G', 'G'],
     () => {
@@ -1645,31 +1735,28 @@ function App() {
                 Library
               </h1>
             </div>
-            <Button
-              variant="icon"
-              size="md"
-              className="border border-border-subtle shrink-0"
-              type="button"
-              onClick={() => setIsSettingsOpen(true)}
-              aria-label="Open settings"
-            >
-              <SettingsIcon size={16} strokeWidth={1.9} />
-            </Button>
-          </section>
-
-          {/* Import panel */}
-          <section className="border border-border-subtle bg-[#000] p-6 mb-6 max-sm:p-[22px]">
-            <div className="grid gap-[14px]">
-              <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 items-stretch max-sm:grid-cols-1">
-                <Button
-                  variant="primary"
-                  onClick={() => void handleImportDialog()}
-                  disabled={isImporting}
-                >
-                  <UploadIcon size={16} strokeWidth={1.9} aria-hidden="true" />
-                  <span>{isImporting ? 'Importing…' : 'Import files'}</span>
-                </Button>
-              </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="icon"
+                size="md"
+                className="border border-border-subtle"
+                type="button"
+                onClick={() => void handleImportDialog()}
+                disabled={isImporting}
+                aria-label="Import files"
+              >
+                {isImporting ? <Spinner className="size-4" /> : <UploadIcon size={16} strokeWidth={1.9} />}
+              </Button>
+              <Button
+                variant="icon"
+                size="md"
+                className="border border-border-subtle"
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                aria-label="Open settings"
+              >
+                <SettingsIcon size={16} strokeWidth={1.9} />
+              </Button>
             </div>
           </section>
 
@@ -1710,7 +1797,6 @@ function App() {
                     const progressValue = progress?.progress ?? 0
                     const progressWidth = `${Math.max(0, Math.min(100, progressValue * 100))}%`
                     const isDeletingDocument = deletingDocumentIds.includes(document.id)
-                    const isRefining = refiningDocumentIds.has(document.id)
                     return (
                       <ContextMenu
                         key={document.id}
@@ -1761,12 +1847,6 @@ function App() {
                             <SourceIcon sourceType={document.sourceType} size={14} strokeWidth={1.9} />
                             {sourceLabel(document.sourceType)}
                           </span>
-                          {isRefining ? (
-                            <span className="relative z-[1] inline-flex self-end items-center gap-1.5 px-2 py-[5px] border border-white/[0.12] bg-black/60 text-white/[0.7] text-[0.68rem] tracking-[0.06em] uppercase">
-                              <Loader2Icon size={11} strokeWidth={2} className="animate-spin" />
-                              Refining
-                            </span>
-                          ) : null}
                         </div>
                         {/* Document meta */}
                         <div className="min-w-0 flex flex-col gap-[10px]">
@@ -2104,34 +2184,167 @@ function App() {
                 </Button>
               </Tooltip>
             ) : null}
-            <div
-              className="w-[min(100%,var(--reader-width,840px))] mx-auto font-reading leading-[1.78] px-10 pt-8 pb-12 max-sm:px-[18px] max-sm:pb-10"
-              style={readerColumnStyle}
-            >
-              {activeDocument.chapters.map((chapter) => (
-                <section
-                  key={chapter.id}
-                  className="[content-visibility:auto] [contain-intrinsic-size:900px] [&+&]:mt-14"
+            {/* PDF toolbar */}
+            {activeDocument.sourceType === 'pdf' ? (
+              <div className="sticky top-0 z-10 flex items-center justify-center gap-1 py-2 px-4 bg-black/80 backdrop-blur-[10px] border-b border-white/[0.07]">
+                {/* Zoom out */}
+                <button
+                  type="button"
+                  onClick={() => setPdfZoom((z) => Math.max(50, z - 10))}
+                  disabled={pdfZoom <= 50}
+                  className="inline-flex items-center justify-center w-8 h-8 text-text-muted hover:text-text-primary disabled:opacity-30 transition-colors"
+                  aria-label="Zoom out"
                 >
-                  {!isUtilityHeading(chapter.title) ? (
-                    <h2 className="m-0 mb-5 text-[0.78rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
-                      {chapter.title}
-                    </h2>
-                  ) : null}
-                  {chapter.content.map((block) => (
-                    <ReaderBlockView
-                      key={block.id}
-                      block={block}
-                      chapterId={chapter.id}
-                      documentId={activeDocument.id}
-                      highlights={documentHighlights}
-                      searchQuery={isReaderSearchOpen ? searchQuery : ''}
-                      activeSearchBlockId={activeSearchBlockId}
-                      onPreviewImage={setPreviewImage}
-                    />
-                  ))}
-                </section>
-              ))}
+                  <ZoomOutIcon size={15} strokeWidth={1.8} />
+                </button>
+                {/* Zoom value + reset */}
+                <button
+                  type="button"
+                  onClick={() => setPdfZoom(100)}
+                  className="min-w-[48px] text-center text-xs text-text-secondary hover:text-text-primary transition-colors tabular-nums"
+                  aria-label="Reset zoom"
+                >
+                  {pdfZoom}%
+                </button>
+                {/* Zoom in */}
+                <button
+                  type="button"
+                  onClick={() => setPdfZoom((z) => Math.min(200, z + 10))}
+                  disabled={pdfZoom >= 200}
+                  className="inline-flex items-center justify-center w-8 h-8 text-text-muted hover:text-text-primary disabled:opacity-30 transition-colors"
+                  aria-label="Zoom in"
+                >
+                  <ZoomInIcon size={15} strokeWidth={1.8} />
+                </button>
+
+                <div className="w-px h-4 bg-white/[0.12] mx-1" />
+
+                {/* Fit width */}
+                <button
+                  type="button"
+                  onClick={() => setPdfZoom(100)}
+                  className="inline-flex items-center justify-center w-8 h-8 text-text-muted hover:text-text-primary transition-colors"
+                  aria-label="Fit width"
+                  title="Fit width"
+                >
+                  <FitWidthIcon size={15} strokeWidth={1.8} />
+                </button>
+
+                <div className="w-px h-4 bg-white/[0.12] mx-1" />
+
+                {/* Single / two-page toggle */}
+                <button
+                  type="button"
+                  onClick={() => setPdfTwoPage((v) => !v)}
+                  className={`inline-flex items-center justify-center w-8 h-8 transition-colors ${pdfTwoPage ? 'text-text-primary' : 'text-text-muted hover:text-text-primary'}`}
+                  aria-label={pdfTwoPage ? 'Single page' : 'Two-page spread'}
+                  title={pdfTwoPage ? 'Single page' : 'Two-page spread'}
+                >
+                  {pdfTwoPage ? <LayoutSingleIcon size={15} strokeWidth={1.8} /> : <Columns2Icon size={15} strokeWidth={1.8} />}
+                </button>
+
+                <div className="w-px h-4 bg-white/[0.12] mx-1" />
+
+                {/* Dark mode toggle */}
+                <button
+                  type="button"
+                  onClick={() => setPdfDarkMode((v) => !v)}
+                  className={`inline-flex items-center justify-center w-8 h-8 transition-colors ${pdfDarkMode ? 'text-text-primary' : 'text-text-muted hover:text-text-primary'}`}
+                  aria-label={pdfDarkMode ? 'Light mode' : 'Dark mode'}
+                  title={pdfDarkMode ? 'Invert off' : 'Invert colors (dark)'}
+                >
+                  {pdfDarkMode ? <SunIcon size={15} strokeWidth={1.8} /> : <MoonIcon size={15} strokeWidth={1.8} />}
+                </button>
+              </div>
+            ) : null}
+
+            <div
+              className={activeDocument.sourceType === 'pdf'
+                ? 'mx-auto pt-4 pb-16 px-4 max-sm:px-2'
+                : 'epub-prose w-[min(100%,var(--reader-width,840px))] mx-auto font-reading leading-[1.78] px-10 pt-8 pb-12 max-sm:px-[18px] max-sm:pb-10'}
+              style={activeDocument.sourceType === 'pdf'
+                ? { width: `${Math.min(pdfZoom, 100)}%`, maxWidth: `${pdfZoom * 10}px` }
+                : readerColumnStyle}
+            >
+              {activeDocument.sourceType === 'pdf' ? (
+                // ── PDF: flat page list, optionally paired side-by-side ──────────
+                (() => {
+                  const allPages = activeDocument.chapters.flatMap((ch) =>
+                    ch.content.filter((b) => b.type === 'pdf-page').map((b) => ({ block: b, chapterId: ch.id }))
+                  )
+                  if (pdfTwoPage) {
+                    const pairs: Array<[typeof allPages[0], typeof allPages[0] | null]> = []
+                    // First page alone (cover), then pairs
+                    if (allPages.length > 0) pairs.push([allPages[0], null])
+                    for (let i = 1; i < allPages.length; i += 2) {
+                      pairs.push([allPages[i], allPages[i + 1] ?? null])
+                    }
+                    return pairs.map((pair, idx) => (
+                      <div key={idx} className={`flex gap-1 mb-1 ${pair[1] ? 'items-start' : 'justify-center'}`}>
+                        <div className={pair[1] ? 'flex-1 min-w-0' : 'w-1/2'}>
+                          <PdfPageBlock block={pair[0].block} chapterId={pair[0].chapterId} isDarkMode={pdfDarkMode} />
+                        </div>
+                        {pair[1] ? (
+                          <div className="flex-1 min-w-0">
+                            <PdfPageBlock block={pair[1].block} chapterId={pair[1].chapterId} isDarkMode={pdfDarkMode} />
+                          </div>
+                        ) : null}
+                      </div>
+                    ))
+                  }
+                  // Single-page layout with chapter headings
+                  return activeDocument.chapters.map((chapter) => (
+                    <section key={chapter.id} className="[content-visibility:auto] [contain-intrinsic-size:1200px]">
+                      {!isUtilityHeading(chapter.title) && activeDocument.chapters.length > 1 ? (
+                        <h2 className="m-0 mb-2 mt-4 text-[0.72rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
+                          {chapter.title}
+                        </h2>
+                      ) : null}
+                      <div className="flex flex-col gap-1">
+                        {chapter.content.map((block) => (
+                          <ReaderBlockView
+                            key={block.id}
+                            block={block}
+                            chapterId={chapter.id}
+                            documentId={activeDocument.id}
+                            highlights={documentHighlights}
+                            searchQuery={isReaderSearchOpen ? searchQuery : ''}
+                            activeSearchBlockId={activeSearchBlockId}
+                            onPreviewImage={setPreviewImage}
+                            pdfDarkMode={pdfDarkMode}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  ))
+                })()
+              ) : (
+                // ── Non-PDF: regular block renderer ──────────────────────────────
+                activeDocument.chapters.map((chapter) => (
+                  <section
+                    key={chapter.id}
+                    className="[content-visibility:auto] [contain-intrinsic-size:900px] [&+&]:mt-10 [&+&]:pt-10 [&+&]:border-t [&+&]:border-border-subtle"
+                  >
+                    {!isUtilityHeading(chapter.title) ? (
+                      <h2 className="m-0 mb-5 text-[0.78rem] font-display font-semibold text-text-muted uppercase tracking-[0.16em]">
+                        {chapter.title}
+                      </h2>
+                    ) : null}
+                    {chapter.content.map((block) => (
+                      <ReaderBlockView
+                        key={block.id}
+                        block={block}
+                        chapterId={chapter.id}
+                        documentId={activeDocument.id}
+                        highlights={documentHighlights}
+                        searchQuery={isReaderSearchOpen ? searchQuery : ''}
+                        activeSearchBlockId={activeSearchBlockId}
+                        onPreviewImage={setPreviewImage}
+                      />
+                    ))}
+                  </section>
+                ))
+              )}
             </div>
           </div>
 
@@ -2200,9 +2413,6 @@ function App() {
         currentDocumentId={mode === 'reader' ? activeDocumentId : null}
       />
 
-      {showOnboarding && (
-        <OllamaOnboarding onComplete={() => setShowOnboarding(false)} />
-      )}
     </div>
     </TooltipProvider>
   )

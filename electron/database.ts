@@ -278,8 +278,7 @@ function hydrateDocuments(context: DatabaseContext): DocumentRecord[] {
   const chapterRows = context.connection
     .prepare(
       `SELECT id, document_id as documentId, title, order_index as orderIndex,
-              content_json as contentJson, refined_content_json as refinedContentJson,
-              outline_depth as outlineDepth
+              content_json as contentJson, outline_depth as outlineDepth
        FROM chapters ORDER BY order_index ASC`,
     )
     .all() as Array<{
@@ -288,7 +287,6 @@ function hydrateDocuments(context: DatabaseContext): DocumentRecord[] {
       title: string;
       orderIndex: number;
       contentJson: string;
-      refinedContentJson: string | null;
       outlineDepth: number;
     }>;
   const chapterMap = new Map<string, Chapter[]>();
@@ -298,8 +296,7 @@ function hydrateDocuments(context: DatabaseContext): DocumentRecord[] {
     const chapter: Chapter = {
       id: row.id,
       title: row.title,
-      // Use refined content if available so reader shows polished text on reload
-      content: parseJson(row.refinedContentJson ?? row.contentJson),
+      content: parseJson(row.contentJson),
     };
     if (row.outlineDepth) chapter.outlineDepth = row.outlineDepth;
     chapters.push(chapter);
@@ -683,10 +680,6 @@ const defaultSettings: AppSettings = {
   aiProvider: null,
   aiModel: null,
   aiApiKey: null,
-  localAiEnabled: true,
-  refinementProvider: "google",
-  refinementModel: "gemini-3.1-flash-lite-preview",
-  refinementApiKey: null,
 };
 
 export function loadSettings(context: DatabaseContext): AppSettings {
@@ -705,11 +698,6 @@ export function loadSettings(context: DatabaseContext): AppSettings {
     aiProvider: (row.aiProvider as AppSettings["aiProvider"]) ?? null,
     aiModel: row.aiModel ?? null,
     aiApiKey: row.aiApiKey ?? null,
-    localAiEnabled: row.localAiEnabled ?? true,
-    refinementProvider:
-      (row.refinementProvider as AppSettings["refinementProvider"]) ?? "google",
-    refinementModel: row.refinementModel ?? "gemini-3.1-flash-lite-preview",
-    refinementApiKey: row.refinementApiKey ?? null,
   };
 }
 
@@ -725,10 +713,6 @@ export function saveSettings(
       aiProvider: settings.aiProvider ?? null,
       aiModel: settings.aiModel ?? null,
       aiApiKey: settings.aiApiKey ?? null,
-      localAiEnabled: settings.localAiEnabled,
-      refinementProvider: settings.refinementProvider,
-      refinementModel: settings.refinementModel,
-      refinementApiKey: settings.refinementApiKey ?? null,
     })
     .onConflictDoUpdate({
       target: settingsTable.id,
@@ -737,10 +721,6 @@ export function saveSettings(
         aiProvider: settings.aiProvider ?? null,
         aiModel: settings.aiModel ?? null,
         aiApiKey: settings.aiApiKey ?? null,
-        localAiEnabled: settings.localAiEnabled,
-        refinementProvider: settings.refinementProvider,
-        refinementModel: settings.refinementModel,
-        refinementApiKey: settings.refinementApiKey ?? null,
       },
     })
     .run();
@@ -748,133 +728,3 @@ export function saveSettings(
   return settings;
 }
 
-export function isOllamaSetupComplete(context: DatabaseContext): boolean {
-  const row = context.db
-    .select()
-    .from(settingsTable)
-    .where(eq(settingsTable.id, 1))
-    .get();
-  return row?.ollamaSetupComplete ?? false;
-}
-
-export function markOllamaSetupComplete(context: DatabaseContext): void {
-  context.db
-    .insert(settingsTable)
-    .values({
-      id: 1,
-      aiEnabled: false,
-      localAiEnabled: true,
-      ollamaSetupComplete: true,
-    })
-    .onConflictDoUpdate({
-      target: settingsTable.id,
-      set: { ollamaSetupComplete: true },
-    })
-    .run();
-}
-
-export interface ChapterRefinementRow {
-  id: string;
-  documentId: string;
-  orderIndex: number;
-  contentJson: string;
-  refinementStatus: string;
-  outlineDepth: number;
-  title: string;
-}
-
-export function getPendingRefinementChapters(
-  context: DatabaseContext,
-): ChapterRefinementRow[] {
-  return context.connection
-    .prepare(
-      `SELECT id, document_id as documentId, order_index as orderIndex, content_json as contentJson, refinement_status as refinementStatus, outline_depth as outlineDepth, title
-       FROM chapters WHERE refinement_status = 'pending' ORDER BY order_index ASC`,
-    )
-    .all() as ChapterRefinementRow[];
-}
-
-export function getAllChapterRowsForDocument(
-  context: DatabaseContext,
-  documentId: string,
-): Array<{ id: string; title: string; contentJson: string; refinedContentJson: string | null; outlineDepth: number; orderIndex: number }> {
-  return context.connection
-    .prepare(
-      `SELECT id, title, content_json as contentJson, refined_content_json as refinedContentJson, outline_depth as outlineDepth, order_index as orderIndex
-       FROM chapters WHERE document_id = ? ORDER BY order_index ASC`,
-    )
-    .all(documentId) as Array<{ id: string; title: string; contentJson: string; refinedContentJson: string | null; outlineDepth: number; orderIndex: number }>;
-}
-
-export function saveRefinedChapter(
-  context: DatabaseContext,
-  chapterId: string,
-  refinedContentJson: string,
-  status: "done" | "failed",
-): void {
-  context.connection
-    .prepare(
-      "UPDATE chapters SET refined_content_json = ?, refinement_status = ? WHERE id = ?",
-    )
-    .run(refinedContentJson, status, chapterId);
-}
-
-export function markChapterRefinementStatus(
-  context: DatabaseContext,
-  chapterId: string,
-  status: string,
-): void {
-  context.connection
-    .prepare("UPDATE chapters SET refinement_status = ? WHERE id = ?")
-    .run(status, chapterId);
-}
-
-export function forceResetDocumentRefinement(
-  context: DatabaseContext,
-  documentId: string,
-): void {
-  context.connection
-    .prepare(
-      "UPDATE chapters SET refinement_status = 'pending', refined_content_json = NULL WHERE document_id = ?",
-    )
-    .run(documentId);
-}
-
-export function isDocumentFullyRefined(
-  context: DatabaseContext,
-  documentId: string,
-): boolean {
-  const row = context.connection
-    .prepare(
-      `SELECT COUNT(*) as count FROM chapters WHERE document_id = ? AND refinement_status != 'done'`,
-    )
-    .get(documentId) as { count: number };
-  return row.count === 0;
-}
-
-export function resetStuckProcessingChapters(context: DatabaseContext): void {
-  context.connection
-    .prepare(
-      "UPDATE chapters SET refinement_status = 'pending' WHERE refinement_status = 'processing'",
-    )
-    .run();
-}
-
-export function updateDocumentToc(
-  context: DatabaseContext,
-  documentId: string,
-  toc: TocItem[],
-): void {
-  context.connection
-    .prepare("UPDATE documents SET toc_json = ? WHERE id = ?")
-    .run(JSON.stringify(toc), documentId);
-}
-
-export function getRefiningDocumentIds(context: DatabaseContext): string[] {
-  const rows = context.connection
-    .prepare(
-      `SELECT DISTINCT document_id FROM chapters WHERE refinement_status IN ('pending', 'processing')`,
-    )
-    .all() as Array<{ document_id: string }>;
-  return rows.map((r) => r.document_id);
-}

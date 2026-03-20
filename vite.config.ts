@@ -5,10 +5,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 const electronRuntimeDependencies = [
-  '@google/gemini-cli-core',
-  '@steipete/summarize',
-  'ai',
-  'ai-sdk-provider-gemini-cli',
+  '@hyzyla/pdfium',
   'better-sqlite3',
   'drizzle-orm',
   'drizzle-orm/better-sqlite3',

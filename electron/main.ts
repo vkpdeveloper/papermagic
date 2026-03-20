@@ -2,15 +2,6 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createLibraryStore } from './library'
-import {
-  ensureOllama,
-  startOllamaServer,
-  stopServer,
-  setOllamaProgressCallback,
-  getCurrentStatus,
-} from './ollama'
-import { setRefinementEventCallback, startRefinementWorker, stopRefinementWorker } from './refinement'
-import { createDatabaseContext, isOllamaSetupComplete, markOllamaSetupComplete, resetStuckProcessingChapters } from './database'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -90,14 +81,9 @@ function registerIpcHandlers() {
   ipcMain.handle('paper:save-settings', (_event, settings) => requireStore().saveSettings(settings))
   ipcMain.handle('paper:validate-api-key', (_event, provider, apiKey, modelId) => requireStore().validateApiKey(provider, apiKey, modelId))
   ipcMain.handle('paper:get-provider-models', (_event, provider) => requireStore().getProviderModels(provider))
-  ipcMain.handle('paper:get-ollama-status', () => getCurrentStatus())
-  ipcMain.handle('paper:rerun-refinement', (_event, documentId: string) => requireStore().rerunRefinement(documentId))
-  ipcMain.handle('paper:get-refining-document-ids', () => requireStore().getRefiningDocumentIds())
 }
 
 app.on('window-all-closed', () => {
-  stopRefinementWorker()
-  stopServer()
   if (process.platform !== 'darwin') {
     app.quit()
     win = null
@@ -110,57 +96,8 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(async () => {
-  const userDataPath = app.getPath('userData')
-  const dbContext = createDatabaseContext(userDataPath)
-
-  libraryStore = createLibraryStore(userDataPath)
+app.whenReady().then(() => {
+  libraryStore = createLibraryStore(app.getPath('userData'))
   registerIpcHandlers()
   createWindow()
-
-  // Wire up IPC push events — send to renderer whenever the window is ready
-  setOllamaProgressCallback((progress) => {
-    console.log('[ollama]', progress.status, '—', progress.message, progress.progress !== undefined ? `${progress.progress}%` : '')
-    win?.webContents.send('ollama:progress', progress)
-  })
-
-  setRefinementEventCallback((update) => {
-    win?.webContents.send('refinement:chapter-done', update)
-  })
-
-  const settings = await libraryStore.loadSettings()
-
-  // Reset any chapters that were mid-processing when the app last stopped
-  resetStuckProcessingChapters(dbContext)
-
-  // Start refinement worker — it will use whatever provider/model is in settings
-  startRefinementWorker(dbContext, settings)
-
-  // Only spin up Ollama if local AI is the selected refinement provider
-  if (settings.refinementProvider !== 'local') {
-    console.log(`[refinement] provider=${settings.refinementProvider}, model=${settings.refinementModel} — skipping Ollama`)
-    return
-  }
-
-  const setupDone = isOllamaSetupComplete(dbContext)
-  console.log('[ollama] setup already complete:', setupDone)
-
-  if (!setupDone) {
-    // First-time onboarding: install + pull + start, with progress pushed to UI
-    try {
-      await ensureOllama()
-      markOllamaSetupComplete(dbContext)
-    } catch (err) {
-      console.error('[ollama] setup failed:', err)
-      win?.webContents.send('ollama:progress', {
-        status: 'error',
-        message: String(err instanceof Error ? err.message : err),
-      })
-    }
-  } else {
-    // Subsequent starts: silently start server
-    console.log('[ollama] starting server on port 11435…')
-    const started = await startOllamaServer()
-    console.log('[ollama] server started:', started)
-  }
 })

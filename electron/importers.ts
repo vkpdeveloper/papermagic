@@ -104,6 +104,27 @@ function domRootFromHtml(html: string) {
   return { document, root }
 }
 
+function inlineToMarkdown(node: Element | ChildNode): string {
+  const TEXT_NODE = 3
+  if (node.nodeType === TEXT_NODE) {
+    return node.textContent ?? ''
+  }
+  const el = node as Element
+  const tagName = el.tagName?.toLowerCase() ?? ''
+  const children = () => Array.from(el.childNodes).map(inlineToMarkdown).join('')
+
+  if (tagName === 'br') return ' '
+  if (tagName === 'em' || tagName === 'i') return `*${children()}*`
+  if (tagName === 'strong' || tagName === 'b') return `**${children()}**`
+  if (tagName === 'code') return `\`${children()}\``
+  if (tagName === 'a') {
+    const href = el.getAttribute('href') ?? ''
+    const text = children()
+    return href ? `[${text}](${href})` : text
+  }
+  return children()
+}
+
 function htmlToBlocks(html: string): ReaderBlock[] {
   const { root } = domRootFromHtml(html)
 
@@ -135,17 +156,17 @@ function htmlToBlocks(html: string): ReaderBlock[] {
     }
 
     if (tagName === 'p') {
-      pushTextBlock('paragraph', node.textContent ?? '')
+      pushTextBlock('paragraph', inlineToMarkdown(node))
       return
     }
 
     if (/^h[1-6]$/.test(tagName)) {
-      pushTextBlock('heading', node.textContent ?? '', Number(tagName[1]))
+      pushTextBlock('heading', inlineToMarkdown(node), Number(tagName[1]))
       return
     }
 
     if (tagName === 'blockquote') {
-      pushTextBlock('quote', node.textContent ?? '')
+      pushTextBlock('quote', inlineToMarkdown(node))
       return
     }
 
@@ -159,9 +180,10 @@ function htmlToBlocks(html: string): ReaderBlock[] {
     }
 
     if (tagName === 'ul' || tagName === 'ol') {
+      const ordered = tagName === 'ol'
       const items = Array.from(node.children)
         .filter((child) => child.tagName.toLowerCase() === 'li')
-        .map((item) => normalizeWhitespace(item.textContent ?? ''))
+        .map((item) => normalizeWhitespace(inlineToMarkdown(item)))
         .filter(Boolean)
 
       if (items.length > 0) {
@@ -169,6 +191,7 @@ function htmlToBlocks(html: string): ReaderBlock[] {
           id: createId('block'),
           type: 'list',
           items,
+          ordered,
         })
       }
       return
@@ -232,73 +255,6 @@ function textFromXmlValue(value: unknown): string {
   return ''
 }
 
-function median(values: number[]): number {
-  const sorted = [...values].sort((left, right) => left - right)
-  const middle = Math.floor(sorted.length / 2)
-
-  if (sorted.length === 0) {
-    return 14
-  }
-
-  if (sorted.length % 2 === 0) {
-    return (sorted[middle - 1] + sorted[middle]) / 2
-  }
-
-  return sorted[middle]
-}
-
-// ─── MuPDF structured-text types ──────────────────────────────────────────────
-// Actual shape from mupdf asJSON() — lines are flat (no spans array):
-// { blocks: [{ type, bbox: {x,y,w,h}, lines: [{ wmode, bbox: {x,y,w,h,flags},
-//   font: {name,family,weight,style,size}, x, y, text }] }] }
-
-interface MuFont {
-  name: string
-  family: string
-  weight: string   // 'normal' | 'bold'
-  style: string    // 'normal' | 'italic'
-  size: number
-}
-
-interface MuBBox {
-  x: number
-  y: number
-  w: number
-  h: number
-}
-
-interface MuLine {
-  wmode: number
-  bbox: MuBBox & { flags?: number }
-  font: MuFont
-  x: number
-  y: number
-  text: string
-}
-
-interface MuBlock {
-  type: 'text' | 'image'
-  bbox: MuBBox
-  lines?: MuLine[]
-}
-
-interface MuStructuredPage {
-  blocks: MuBlock[]
-}
-
-// ─── Internal representation ──────────────────────────────────────────────────
-
-interface PdfLine {
-  text: string
-  x: number
-  y: number
-  fontSize: number
-  bold: boolean
-  italic: boolean
-  mono: boolean
-  pageNumber: number
-  pageHeight: number
-}
 
 // ─── Cover image ─────────────────────────────────────────────────────────────
 
@@ -340,520 +296,7 @@ function renderMuPageAsCover(doc: InstanceType<typeof mupdf.Document>, cacheDire
   return undefined
 }
 
-// ─── Structured text → PdfLine[] ─────────────────────────────────────────────
-
-/**
- * Detect whether a page has a two-column layout.
- * Heuristic: collect all body-text x positions and look for two clear clusters
- * (left column ~0-45% of page width, right column ~50-100%).
- */
-function detectColumnSplit(rawLines: PdfLine[], pageWidth: number): number | null {
-  if (pageWidth <= 0) return null
-  const xRatios = rawLines.map((l) => l.x / pageWidth)
-  // Count lines in left (<40%) and right (>50%) bands
-  const left = xRatios.filter((r) => r < 0.4).length
-  const right = xRatios.filter((r) => r > 0.5).length
-  const total = rawLines.length
-  if (total < 6) return null
-  // Both columns must have at least 25% of lines to be considered two-column
-  if (left / total >= 0.25 && right / total >= 0.25) {
-    // Find the midpoint gap
-    return pageWidth * 0.48
-  }
-  return null
-}
-
-/**
- * Re-order a set of lines from a two-column page so that left column comes
- * entirely before right column, maintaining vertical order within each column.
- */
-function reorderByColumns(lines: PdfLine[], splitX: number): PdfLine[] {
-  const leftCol = lines.filter((l) => l.x <= splitX).sort((a, b) => a.y - b.y)
-  const rightCol = lines.filter((l) => l.x > splitX).sort((a, b) => a.y - b.y)
-  return [...leftCol, ...rightCol]
-}
-
-function muPageToLines(page: InstanceType<typeof mupdf.Page>, pageNumber: number): PdfLine[] {
-  const bounds = page.getBounds()
-  const pageWidth = bounds[2] - bounds[0]
-  const pageHeight = bounds[3] - bounds[1]
-
-  const stext: MuStructuredPage = JSON.parse(page.toStructuredText('preserve-whitespace').asJSON())
-  const rawLines: PdfLine[] = []
-
-  for (const block of stext.blocks) {
-    if (block.type !== 'text' || !block.lines) continue
-
-    for (const line of block.lines) {
-      // In MuPDF's asJSON() each line has text/font/x/y directly — no spans array
-      const text = normalizeWhitespace(line.text ?? '')
-      if (!text) continue
-
-      // Font metadata comes from line.font
-      const fontSize = line.font?.size ?? 10
-      const bold = line.font?.weight === 'bold'
-      const italic = line.font?.style === 'italic'
-      const fontName = (line.font?.name ?? '').toLowerCase()
-      const fontFamily = (line.font?.family ?? '').toLowerCase()
-      const mono =
-        /courier|mono|consolas|inconsolata|jetbrains|firacode|sourcecodepro|source.code|menlo|monaco|dejavu.sans.mono|liberation.mono|roboto.mono|cascadia|hack|ibm.plex.mono/.test(fontName) ||
-        /courier|mono|consolas|inconsolata|jetbrains|firacode|sourcecodepro|source.code|menlo|monaco|dejavu.sans.mono|liberation.mono|roboto.mono|cascadia|hack|ibm.plex.mono/.test(fontFamily)
-
-      // bbox is an object {x, y, w, h} — use line's own x/y for position
-      const x = line.bbox.x
-      const y = line.bbox.y
-
-      rawLines.push({ text, x, y, fontSize, bold, italic, mono, pageNumber, pageHeight })
-    }
-  }
-
-  // Sort top-to-bottom, left-to-right
-  rawLines.sort((a, b) => {
-    const dy = a.y - b.y
-    return Math.abs(dy) > 2 ? dy : a.x - b.x
-  })
-
-  // Merge fragments that share the same visual line (same y ± 2pt).
-  // This handles justified text where MuPDF emits each word/run as a separate entry.
-  const mergedByRow: PdfLine[] = []
-  for (const line of rawLines) {
-    const prev = mergedByRow[mergedByRow.length - 1]
-    if (prev && Math.abs(line.y - prev.y) <= 2 && line.fontSize === prev.fontSize) {
-      // Same visual row and same font size — join with a space
-      prev.text = normalizeWhitespace(`${prev.text} ${line.text}`)
-    } else {
-      mergedByRow.push({ ...line })
-    }
-  }
-
-  // If this page has two columns, re-order so left column precedes right column
-  const splitX = detectColumnSplit(mergedByRow, pageWidth)
-  if (splitX !== null) {
-    return reorderByColumns(mergedByRow, splitX)
-  }
-
-  return mergedByRow
-}
-
-// ─── Per-page image extraction ────────────────────────────────────────────────
-
-interface ExtractedPageImage {
-  /** Y coordinate of the image's top edge in page units */
-  y: number
-  block: ReaderBlock
-}
-
-/**
- * Run the page through a mupdf Device to intercept every fillImage call,
- * render each image to a JPEG, save it to cacheDirectory, and return
- * ReaderBlocks (type 'image') with file:// src URLs and their page-Y position.
- *
- * Images smaller than minAreaFraction of the page area are skipped (decorative
- * icons, bullets, etc.).
- */
-function extractPageImages(
-  page: InstanceType<typeof mupdf.Page>,
-  pageNumber: number,
-  cacheDirectory: string,
-  minAreaFraction = 0.01,
-): ExtractedPageImage[] {
-  const bounds = page.getBounds()
-  const pageArea = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
-  const results: ExtractedPageImage[] = []
-  let imageIndex = 0
-
-  const callbacks = {
-    fillImage(image: InstanceType<typeof mupdf.Image>, ctm: number[], _alpha: number) {
-      // ctm maps unit-square to page coords: [a,b,c,d,e,f]
-      // For non-rotated: x=e, y=f, w=|a|, h=|d|
-      const y = Math.min(ctm[5], ctm[5] + ctm[3])
-      const w = Math.abs(ctm[0])
-      const h = Math.abs(ctm[3])
-      const area = w * h
-
-      // Skip tiny decorative images
-      if (area < pageArea * minAreaFraction) return
-
-      try {
-        // Convert to RGB pixmap then JPEG — force DeviceRGB + no alpha so
-        // images stored in Gray, CMYK, or with an inverted mask render correctly
-        const rawPixmap = image.toPixmap()
-        const pixmap = rawPixmap.convertToColorSpace(mupdf.ColorSpace.DeviceRGB)
-        const jpegBytes = pixmap.asJPEG(85)
-        const fileName = `pdf-p${pageNumber}-img${imageIndex}.jpg`
-        const filePath = path.join(cacheDirectory, fileName)
-        fsSync.writeFileSync(filePath, jpegBytes)
-        const src = pathToFileURL(filePath).toString()
-
-        results.push({
-          y,
-          block: {
-            id: createId('block'),
-            type: 'image',
-            src,
-            alt: `Image on page ${pageNumber}`,
-          },
-        })
-        imageIndex += 1
-      } catch {
-        // Some images (masks, CMYK without proper colorspace) may fail — skip silently
-      }
-    },
-  }
-
-  const device = new mupdf.Device(callbacks)
-  page.run(device, mupdf.Matrix.identity)
-  device.close()
-
-  return results
-}
-
-/**
- * Merge image blocks into an existing ordered block array.
- * Each image is inserted after the last text/heading/list block whose Y
- * centroid is above the image's Y position.
- * Image Y positions are approximate page-unit values from the Device CTM.
- */
-function mergeImageBlocksIntoPage(
-  blocks: ReaderBlock[],
-  images: ExtractedPageImage[],
-  pageLines: PdfLine[],
-): ReaderBlock[] {
-  if (images.length === 0) return blocks
-
-  // Build a Y-centroid for each block by finding which lines contributed to it.
-  // Since we don't have per-block Y in ReaderBlock, we use the source PdfLines
-  // sorted by index to assign approximate block order; image Y thresholds
-  // are compared against cumulative page Y of the text stream.
-
-  // Simpler approach: map each block to an approximate Y by scanning pageLines
-  // in order. We know blocks are emitted in reading order; we can assign a
-  // "Y anchor" by tracking which page-line was consumed when the block was produced.
-  // As a good approximation, assign Y anchors from sorted unique Y values of lines.
-
-  const sortedLineYs = [...new Set(pageLines.map((l) => l.y))].sort((a, b) => a - b)
-  const blockCount = blocks.length
-
-  // Spread block indices evenly across sortedLineYs
-  function blockY(blockIdx: number): number {
-    if (sortedLineYs.length === 0) return 0
-    const ratio = blockCount <= 1 ? 0 : blockIdx / (blockCount - 1)
-    const lineIdx = Math.round(ratio * (sortedLineYs.length - 1))
-    return sortedLineYs[Math.min(lineIdx, sortedLineYs.length - 1)]
-  }
-
-  const result: ReaderBlock[] = []
-  const sortedImages = [...images].sort((a, b) => a.y - b.y)
-  let nextImageIdx = 0
-
-  for (let bi = 0; bi < blocks.length; bi++) {
-    result.push(blocks[bi])
-
-    // After this block, flush any images whose Y <= the next block's Y anchor
-    const nextBlockY = bi + 1 < blocks.length ? blockY(bi + 1) : Infinity
-    while (nextImageIdx < sortedImages.length && sortedImages[nextImageIdx].y <= nextBlockY) {
-      result.push(sortedImages[nextImageIdx].block)
-      nextImageIdx++
-    }
-  }
-
-  // Any remaining images go at the end
-  while (nextImageIdx < sortedImages.length) {
-    result.push(sortedImages[nextImageIdx].block)
-    nextImageIdx++
-  }
-
-  return result
-}
-
-// ─── Running header/footer removal ───────────────────────────────────────────
-
-function normalizePdfLineSignature(text: string): string {
-  return normalizeWhitespace(text).replace(/\b\d+\b/g, '#').toLowerCase()
-}
-
-function filterRepeatedPdfChrome(pages: Array<{ pageNumber: number; lines: PdfLine[] }>): Array<{ pageNumber: number; lines: PdfLine[] }> {
-  const signatureCounts = new Map<string, number>()
-
-  for (const { lines } of pages) {
-    const pageSignatures = new Set<string>()
-    for (const line of lines) {
-      const verticalRatio = line.pageHeight === 0 ? 0 : line.y / line.pageHeight
-      const isMarginLine = verticalRatio <= 0.12 || verticalRatio >= 0.88
-      if (!isMarginLine) continue
-      const sig = normalizePdfLineSignature(line.text)
-      if (sig.length >= 3) pageSignatures.add(sig)
-    }
-    for (const sig of pageSignatures) {
-      signatureCounts.set(sig, (signatureCounts.get(sig) ?? 0) + 1)
-    }
-  }
-
-  return pages.map(({ pageNumber, lines }) => ({
-    pageNumber,
-    lines: lines.filter((line) => {
-      const verticalRatio = line.pageHeight === 0 ? 0 : line.y / line.pageHeight
-      const isMarginLine = verticalRatio <= 0.12 || verticalRatio >= 0.88
-      if (!isMarginLine) return true
-      return (signatureCounts.get(normalizePdfLineSignature(line.text)) ?? 0) < 3
-    }),
-  }))
-}
-
-// ─── PdfLine[] → ReaderBlock[] ───────────────────────────────────────────────
-
-function titleCaseIfLikelyHeading(text: string): string {
-  if (text === text.toUpperCase() && /[A-Z]/.test(text)) {
-    return text.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
-  }
-  return text
-}
-
-function normalizePdfParagraphText(lines: string[]): string {
-  // Join lines one-by-one. If a line ends with a hyphen and the next starts with a lowercase
-  // letter it's a PDF line-break hyphen: keep the hyphen and join without an extra space
-  // (the hyphen may be structural as in "chain-of-thought" or a break hyphen as in "promis-ing").
-  let result = ''
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    if (i === 0) {
-      result = line
-      continue
-    }
-    const nextStart = line[0] ?? ''
-    if (result.endsWith('-') && /[a-z]/.test(nextStart)) {
-      // Keep the trailing hyphen and join directly (no extra space)
-      result = result + line
-    } else {
-      result = result + ' ' + line
-    }
-  }
-  return normalizeWhitespace(result.replace(/\s+([,.;:!?])/g, '$1'))
-}
-
-function pdfLinesToBlocks(lines: PdfLine[], baselineFontSize: number): ReaderBlock[] {
-  const blocks: ReaderBlock[] = []
-  let paragraphBuffer: string[] = []
-  let listBuffer: string[] = []
-  let codeBuffer: string[] = []
-  let previousLine: PdfLine | null = null
-  // Accumulate consecutive heading-candidate lines to join wrapped headings
-  let headingBuffer: { text: string; fontSize: number; bold: boolean } | null = null
-
-  const flushParagraph = () => {
-    if (paragraphBuffer.length === 0) return
-    blocks.push({ id: createId('block'), type: 'paragraph', text: normalizePdfParagraphText(paragraphBuffer) })
-    paragraphBuffer = []
-  }
-
-  const flushList = () => {
-    if (listBuffer.length === 0) return
-    blocks.push({ id: createId('block'), type: 'list', items: [...listBuffer] })
-    listBuffer = []
-  }
-
-  const flushCode = () => {
-    if (codeBuffer.length === 0) return
-    blocks.push({ id: createId('block'), type: 'code', text: codeBuffer.join('\n') })
-    codeBuffer = []
-  }
-
-  const flushHeading = () => {
-    if (!headingBuffer) return
-    blocks.push({
-      id: createId('block'),
-      type: 'heading',
-      level: headingBuffer.fontSize >= baselineFontSize * 1.4 ? 2 : 3,
-      text: titleCaseIfLikelyHeading(headingBuffer.text),
-    })
-    headingBuffer = null
-  }
-
-  // Pre-process: merge lone bullet marker lines and drop-cap letter lines into the
-  // following text line. MuPDF sometimes emits "•" as a separate line at the same y,
-  // and ornamental drop-caps as isolated single letters on their own line.
-  const mergedLines: PdfLine[] = []
-  for (let i = 0; i < lines.length; i++) {
-    const cur = lines[i]
-    const next = lines[i + 1]
-
-    // Bullet marker on its own line immediately before/beside the text
-    if (/^[-\u2022*]$/.test(cur.text) && next && Math.abs(next.y - cur.y) <= cur.fontSize * 0.6) {
-      mergedLines.push({ ...next, text: `${cur.text} ${next.text}` })
-      i++
-      continue
-    }
-
-    // Drop-cap: single uppercase letter immediately before a continuation line
-    // (continuation starts with a lowercase letter, indicating the cap was the first letter of a word)
-    const isDropCap =
-      !cur.mono &&
-      /^[A-Z]$/.test(cur.text) &&
-      next !== undefined &&
-      /^[a-z]/.test(next.text) &&
-      Math.abs(next.y - cur.y) <= cur.fontSize * 2.5
-
-    if (isDropCap && next) {
-      mergedLines.push({ ...next, text: `${cur.text}${next.text}` })
-      i++
-      continue
-    }
-
-    mergedLines.push(cur)
-  }
-
-  for (const line of mergedLines) {
-    // ── Skip lone page-number lines (just a number, possibly with roman numerals) ──
-    if (/^[ivxlcdmIVXLCDM\d]+$/.test(line.text) && line.text.length <= 4) {
-      continue
-    }
-
-    // ── Skip residual single-letter drop-caps that had no mergeable successor ──
-    if (!line.mono && /^[A-Z]$/.test(line.text)) {
-      continue
-    }
-
-    const gap = previousLine ? line.y - previousLine.y : line.fontSize
-    const indentDelta = previousLine ? Math.abs(line.x - previousLine.x) : 0
-    const endsSentence = /[.!?:""']$/.test(paragraphBuffer[paragraphBuffer.length - 1] ?? '')
-    const isListItem = /^([-\u2022*]|(\d+[.)]))\s+/.test(line.text)
-    const wordCount = line.text.split(/\s+/).filter(Boolean).length
-    const startsLikeHeading = /^[A-Z0-9IVX]/.test(line.text) && !/^[a-z]/.test(line.text)
-    const endsLikeSentence = /[.!?;]$/.test(line.text) || (!/^[A-Z0-9][A-Z0-9\s,'":.-]+$/.test(line.text) && /,$/.test(line.text))
-
-    // A bold line that contains a mid-sentence period (e.g. "OpenAI. Founded in 2015 by eight people"
-    // or "Anthropic (Claude). Founded in 2020 by") is a bold lead-in for the following paragraph,
-    // NOT a standalone heading.
-    const hasMidSentencePeriod = /[A-Za-z)]\.\s+[A-Z]/.test(line.text)
-
-    // A line ending with a stop/continuation word is an incomplete sentence fragment, not a heading.
-    // Exception: ALL-CAPS lines (e.g. "CHOOSING A PROVIDER AND") are section titles and must not
-    // be filtered out by stop-word check.
-    const isAllCaps = /^[A-Z0-9][A-Z0-9\s,'":.-]+$/.test(line.text)
-    const endsWithStopWord =
-      !isAllCaps &&
-      /\b(a|an|the|in|of|to|for|on|at|by|as|with|from|into|than|that|which|and|or|is|are|was|were|be|been|being|have|has|had|its|checking|building|provide|being|make|can|need|now|use|take|do|get|set|well|just|only|also|both|even|here|there|when|where|how|what|why|who|up|out|down|back|will)$/i.test(line.text)
-
-    // A bold baseline-font line that has a colon mid-sentence (e.g. "Chunking: You start by taking
-    // a document") is a definition/lead-in line, not a standalone heading.
-    // Exception: short "label:" headings like "Best Practices:" (≤3 words and ends with the colon)
-    const hasDefinitionColon =
-      line.bold &&
-      line.fontSize < baselineFontSize * 1.28 &&
-      /:\s+[A-Z]/.test(line.text) &&
-      wordCount >= 4
-
-    // A bold baseline-font line that contains a finite verb in a predicate position is a sentence
-    // fragment lead-in, not a heading. E.g. "Multi-agent systems cover the coordination" or
-    // "Others include Mistral (an open-source".
-    // Only apply to baseline-size bold lines (larger fonts are genuine section titles).
-    const hasSentenceVerb =
-      line.bold &&
-      line.fontSize < baselineFontSize * 1.28 &&
-      /\b(introduces?|covers?|explores?|examines?|discusses?|describes?|helps?|allows?|provides?|enables?|shows?|demonstrate[sd]?|presents?|includes?)\b/i.test(line.text)
-
-    // A line is a heading when:
-    // 1. font is noticeably larger than baseline (≥1.28×), OR bold + short, OR ALL-CAPS short text
-    //    Single-word lines qualify as headings only when the font is clearly display-size (≥2× baseline)
-    // 2. doesn't end like a sentence (avoids false positives from first sentences)
-    // 3. not a list marker
-    // 4. not a bold lead-in opener (mid-sentence period, ends with stop word, definition colon, or predicate verb)
-    // For ALL-CAPS lines, a single hyphenated "word" still qualifies (e.g. "RETRIEVAL-AUGMENTED")
-    const isHeading =
-      !isListItem &&
-      !hasMidSentencePeriod &&
-      !endsWithStopWord &&
-      !hasSentenceVerb &&
-      !hasDefinitionColon &&
-      line.text.length <= 120 &&
-      (wordCount >= 2 || isAllCaps || line.fontSize >= baselineFontSize * 2.0) &&
-      startsLikeHeading &&
-      !endsLikeSentence &&
-      (line.fontSize >= baselineFontSize * 1.28 ||
-        (line.bold && wordCount <= 12 && line.fontSize >= baselineFontSize * 0.95) ||
-        (/^[A-Z0-9][A-Z0-9\s,'":.-]{3,}$/.test(line.text) && wordCount <= 12))
-
-    // New paragraph when vertical gap is large, big indentation shift, or previous line ended a sentence
-    const startsNewParagraph =
-      gap > line.fontSize * 1.65 || indentDelta > Math.max(18, line.fontSize * 1.1) || endsSentence
-
-    if (isHeading) {
-      flushParagraph()
-      flushList()
-      // Try to join with a previous heading line if it's a continuation
-      // (same font size, bold flag, and small vertical gap)
-      const sameStyle =
-        headingBuffer !== null &&
-        previousLine !== null &&
-        Math.abs(line.fontSize - headingBuffer.fontSize) < 1 &&
-        line.bold === previousLine.bold &&
-        gap <= line.fontSize * 2.0
-      if (sameStyle && headingBuffer) {
-        headingBuffer.text = `${headingBuffer.text} ${line.text}`
-      } else {
-        flushHeading()
-        headingBuffer = { text: line.text, fontSize: line.fontSize, bold: line.bold }
-      }
-      previousLine = line
-      continue
-    }
-
-    // Non-heading line — but if there's an active headingBuffer and this line looks like
-    // a continuation of the heading (ALL-CAPS 1-3 word label, small gap, similar size),
-    // append it to the heading rather than flushing.
-    const isHeadingContinuation =
-      headingBuffer !== null &&
-      previousLine !== null &&
-      gap <= line.fontSize * 2.5 &&
-      wordCount <= 3 &&
-      /^[A-Z][A-Z0-9\s]+$/.test(line.text) &&
-      Math.abs(line.fontSize - headingBuffer.fontSize) <= headingBuffer.fontSize * 0.5
-
-    if (isHeadingContinuation && headingBuffer) {
-      headingBuffer.text = `${headingBuffer.text} ${line.text}`
-      previousLine = line
-      continue
-    }
-
-    flushHeading()
-
-    // ── Monospace lines → code block ──────────────────────────────────────────
-    if (line.mono) {
-      flushParagraph()
-      flushList()
-      codeBuffer.push(line.text)
-      previousLine = line
-      continue
-    }
-
-    // Non-mono line: flush any accumulated code block first
-    flushCode()
-
-    if (startsNewParagraph) {
-      flushParagraph()
-      flushList()
-    }
-
-    if (isListItem) {
-      flushParagraph()
-      listBuffer.push(line.text.replace(/^([-\u2022*]|(\d+[.)]))\s+/, ''))
-      previousLine = line
-      continue
-    }
-
-    paragraphBuffer.push(line.text)
-    previousLine = line
-  }
-
-  flushHeading()
-  flushParagraph()
-  flushList()
-  flushCode()
-
-  return blocks
-}
-
-// ─── Outline → chapter map ───────────────────────────────────────────────────
+// ─── Outline helpers ──────────────────────────────────────────────────────────
 
 interface OutlineItem {
   title: string | undefined
@@ -891,85 +334,10 @@ function extractOutlineEntries(outline: OutlineItem[] | null): OutlineEntry[] {
   return entries
 }
 
-function buildPdfChaptersFromOutline(
-  pageBlocks: Array<{ pageNumber: number; blocks: ReaderBlock[] }>,
-  outlineMap: Map<number, string>,
-  fallbackTitle: string,
-  outlineEntries?: OutlineEntry[],
-): Chapter[] {
-  if (outlineMap.size === 0) return []
-
-  // Build page → depth map from outline entries
-  const depthByPage = new Map<number, number>()
-  if (outlineEntries) {
-    for (const entry of outlineEntries) {
-      depthByPage.set(entry.page, entry.depth)
-    }
-  }
-
-  const chapters: Chapter[] = []
-  let currentChapter: Chapter | null = null
-
-  for (const page of pageBlocks) {
-    const outlineTitle = outlineMap.get(page.pageNumber)
-    const pageContent = outlineTitle
-      ? page.blocks.filter(
-          (b) => b.type !== 'heading' || normalizeWhitespace(b.text ?? '') !== normalizeWhitespace(outlineTitle),
-        )
-      : page.blocks
-
-    if (!currentChapter || outlineTitle) {
-      if (currentChapter && currentChapter.content.length > 0) chapters.push(currentChapter)
-      currentChapter = {
-        id: createId('chapter'),
-        title: outlineTitle || (chapters.length === 0 ? fallbackTitle : `Section ${chapters.length + 1}`),
-        content: pageContent.length > 0 ? [...pageContent] : ensureReadableBlocks([], outlineTitle || fallbackTitle),
-        outlineDepth: outlineTitle ? (depthByPage.get(page.pageNumber) ?? 0) : 0,
-      }
-      continue
-    }
-
-    currentChapter.content.push(...pageContent)
-  }
-
-  if (currentChapter && currentChapter.content.length > 0) chapters.push(currentChapter)
-  return chapters
-}
-
-// ─── Chapter cleanup ──────────────────────────────────────────────────────────
-
-function chapterWordCount(chapter: Chapter): number {
-  return chapter.content.reduce((total, block) => {
-    if (block.text) return total + block.text.split(/\s+/).filter(Boolean).length
-    if (block.items) return total + block.items.join(' ').split(/\s+/).filter(Boolean).length
-    return total
-  }, 0)
-}
-
-function cleanupPdfChapters(chapters: Chapter[], fallbackTitle: string): Chapter[] {
-  const cleaned: Chapter[] = []
-
-  chapters.forEach((chapter, index) => {
-    const words = chapterWordCount(chapter)
-    const hasMeaningfulBody = chapter.content.some((b) => ['paragraph', 'quote', 'list', 'code'].includes(b.type))
-    const title = normalizeWhitespace(chapter.title)
-    const isTinyFrontMatter =
-      index < 3 &&
-      (title === fallbackTitle || /^(\d+(st|nd|rd|th)? edition|contents|foreword|preface)$/i.test(title) || words < 60)
-
-    if ((!hasMeaningfulBody && words === 0) || (isTinyFrontMatter && chapters[index + 1])) {
-      const next = chapters[index + 1]
-      next.content = [...chapter.content.filter((b) => b.type !== 'heading'), ...next.content]
-      return
-    }
-
-    cleaned.push(chapter)
-  })
-
-  return cleaned
-}
-
 // ─── Top-level PDF importer ───────────────────────────────────────────────────
+
+// Render scale for page images: 1.8× gives ~130 DPI for a US-letter page (~1530px wide)
+const PDF_RENDER_SCALE = 1.8
 
 async function importPdf(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
   const extension = path.extname(filePath)
@@ -977,70 +345,76 @@ async function importPdf(filePath: string, cacheDirectory: string): Promise<Docu
   const pdfBuffer = await fs.readFile(filePath)
   await fs.writeFile(sourceCopyPath, pdfBuffer)
 
-  // Open the PDF with MuPDF — synchronous after WASM is loaded
   const doc = mupdf.Document.openDocument(pdfBuffer, 'application/pdf')
   const pageCount = doc.countPages()
 
-  // ── Cover image: render page 1 (or 2 if blank) at high resolution ──────────
+  // Cover thumbnail
   const coverImageUrl = renderMuPageAsCover(doc, cacheDirectory)
 
-  // ── Metadata ────────────────────────────────────────────────────────────────
+  // Metadata
   const rawTitle = doc.getMetaData(mupdf.Document.META_INFO_TITLE) ?? ''
   const rawAuthor = doc.getMetaData(mupdf.Document.META_INFO_AUTHOR) ?? ''
   const fallbackTitle = friendlyFilenameTitle(path.basename(filePath, extension)) || 'Imported PDF'
 
-  // ── Per-page structured text + image extraction ─────────────────────────────
-  const pages: Array<{ pageNumber: number; lines: PdfLine[] }> = []
-  const pageImages: Array<{ pageNumber: number; images: ExtractedPageImage[] }> = []
-  const fontSizes: number[] = []
-
-  for (let i = 0; i < pageCount; i += 1) {
+  // Render each page as a JPEG image
+  const pageBlocks: ReaderBlock[] = []
+  for (let i = 0; i < pageCount; i++) {
     const page = doc.loadPage(i)
-    const lines = muPageToLines(page, i + 1)
-    for (const l of lines) fontSizes.push(l.fontSize)
-    pages.push({ pageNumber: i + 1, lines })
-    pageImages.push({ pageNumber: i + 1, images: extractPageImages(page, i + 1, cacheDirectory) })
+    const bounds = page.getBounds()
+    const pageWidth = bounds[2] - bounds[0]
+    const pageHeight = bounds[3] - bounds[1]
+    const matrix = mupdf.Matrix.scale(PDF_RENDER_SCALE, PDF_RENDER_SCALE)
+    const pixmap = page.toPixmap(matrix, mupdf.ColorSpace.DeviceRGB, false)
+    const jpegBytes = pixmap.asJPEG(88)
+    const fileName = `page-${String(i + 1).padStart(4, '0')}.jpg`
+    const imagePath = path.join(cacheDirectory, fileName)
+    fsSync.writeFileSync(imagePath, jpegBytes)
+    pageBlocks.push({
+      id: createId('block'),
+      type: 'pdf-page',
+      src: pathToFileURL(imagePath).toString(),
+      pageNumber: i + 1,
+      pageWidth,
+      pageHeight,
+    })
     await delay()
   }
 
-  const baselineFontSize = median(fontSizes)
-
-  // ── Strip running headers/footers ───────────────────────────────────────────
-  const cleanedPages = filterRepeatedPdfChrome(pages)
-
-  // ── Convert lines → semantic blocks, then weave in extracted images ──────────
-  const imagesByPage = new Map(pageImages.map((p) => [p.pageNumber, p.images]))
-  const pageBlocks = cleanedPages.map(({ pageNumber, lines }) => {
-    const textBlocks = pdfLinesToBlocks(lines, baselineFontSize)
-    const imgs = imagesByPage.get(pageNumber) ?? []
-    return {
-      pageNumber,
-      blocks: mergeImageBlocksIntoPage(textBlocks, imgs, lines),
-    }
-  })
-
-  const allBlocks = pageBlocks.flatMap((p) => p.blocks)
-  const hasDetectedHeadings = allBlocks.some((b) => b.type === 'heading')
-
-  // ── Outline (TOC) ────────────────────────────────────────────────────────────
+  // Build chapters from PDF outline, or fall back to one chapter for all pages
   const rawOutline = doc.loadOutline() as OutlineItem[] | null
   const outlineEntries = extractOutlineEntries(rawOutline)
-  const outlineMap = new Map(outlineEntries.map((e) => [e.page, e.title]))
-  const outlinedChapters = buildPdfChaptersFromOutline(pageBlocks, outlineMap, fallbackTitle, outlineEntries)
 
-  // ── Assemble chapters: outline → heading split → per-page fallback ──────────
-  const chapters: Chapter[] =
-    outlinedChapters.length > 0
-      ? outlinedChapters
-      : hasDetectedHeadings
-        ? splitBlocksIntoChapters(fallbackTitle, ensureReadableBlocks(allBlocks, fallbackTitle), 3)
-        : pageBlocks.map(({ pageNumber, blocks }) => ({
-            id: createId('chapter'),
-            title: `Page ${pageNumber}`,
-            content: ensureReadableBlocks(blocks, `Page ${pageNumber}`),
-          }))
+  let chapters: Chapter[]
+  if (outlineEntries.length > 0) {
+    const depthByPage = new Map(outlineEntries.map((e) => [e.page, e.depth]))
+    chapters = []
+    let currentChapter: Chapter | null = null
+    const outlineMap = new Map(outlineEntries.map((e) => [e.page, e]))
 
-  const normalizedChapters = cleanupPdfChapters(chapters, fallbackTitle)
+    for (const block of pageBlocks) {
+      const pageNum = block.pageNumber!
+      const entry = outlineMap.get(pageNum)
+      if (!currentChapter || entry) {
+        if (currentChapter) chapters.push(currentChapter)
+        currentChapter = {
+          id: createId('chapter'),
+          title: entry?.title ?? (chapters.length === 0 ? fallbackTitle : `Section ${chapters.length + 1}`),
+          content: [block],
+          outlineDepth: entry ? (depthByPage.get(pageNum) ?? 0) : 0,
+        }
+      } else {
+        currentChapter.content.push(block)
+      }
+    }
+    if (currentChapter) chapters.push(currentChapter)
+  } else {
+    chapters = [{
+      id: createId('chapter'),
+      title: fallbackTitle,
+      content: pageBlocks,
+    }]
+  }
+
   const title = normalizeWhitespace(rawTitle) || fallbackTitle
   const author = normalizeWhitespace(rawAuthor) || 'PDF import'
 
@@ -1048,12 +422,12 @@ async function importPdf(filePath: string, cacheDirectory: string): Promise<Docu
     id: path.basename(cacheDirectory),
     title,
     author,
-    description: 'PDF content reconstructed into the shared reading model.',
+    description: 'PDF rendered as page images.',
     sourceType: 'pdf',
-    preferredMode: 'page',
+    preferredMode: 'scroll',
     originLabel: filePath,
-    extractedWith: outlineMap.size > 0 ? 'MuPDF outline + structured text' : 'MuPDF structured text reconstruction',
-    chapters: normalizedChapters,
+    extractedWith: 'MuPDF image rendering',
+    chapters,
     metadata: {
       coverImageUrl,
       sourcePath: filePath,
@@ -1061,6 +435,7 @@ async function importPdf(filePath: string, cacheDirectory: string): Promise<Docu
     },
   })
 }
+
 
 interface EpubTocEntry {
   title: string

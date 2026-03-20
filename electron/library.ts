@@ -18,12 +18,10 @@ import {
   saveProgress,
   saveSettings,
   upsertDocument,
-  getRefiningDocumentIds,
 } from './database'
 import { importDocumentFromPath } from './importers'
-import { generateDocumentTitle, validateApiKey, PROVIDER_MODELS } from './ai'
+import { validateApiKey, PROVIDER_MODELS } from './ai'
 import type { AiProvider } from './ai'
-import { queueDocumentForRefinement, forceRequeueDocument } from './refinement'
 
 export interface LibraryStore {
   loadState: () => Promise<PersistedState>
@@ -40,8 +38,6 @@ export interface LibraryStore {
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
-  rerunRefinement: (documentId: string) => Promise<void>
-  getRefiningDocumentIds: () => Promise<string[]>
 }
 
 function resolveDocumentCacheDirectory(document: DocumentRecord, libraryRoot: string): string {
@@ -87,7 +83,6 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
     },
     importPaths: async (paths) => {
       const importedDocuments: DocumentRecord[] = []
-      const settings = loadSettings(context)
 
       for (const filePath of paths) {
         const existingDocumentId = findExistingDocumentBySource(context, filePath, filePath)
@@ -96,23 +91,9 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
           continue
         }
 
-        let document = await importDocumentFromPath(filePath, context.libraryRoot)
-
-        if (settings.aiEnabled && settings.aiModel && settings.aiApiKey) {
-          const contentSample = extractTextSample(document)
-          const aiTitle = await generateDocumentTitle(contentSample, settings)
-          if (aiTitle) {
-            document = { ...document, title: aiTitle }
-          }
-        }
-
+        const document = await importDocumentFromPath(filePath, context.libraryRoot)
         upsertDocument(context, document)
         importedDocuments.push(document)
-
-        // Queue PDF documents for background content refinement
-        if (document.sourceType === 'pdf') {
-          queueDocumentForRefinement(context, document.id, settings)
-        }
       }
 
       return importedDocuments
@@ -160,31 +141,6 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
     saveSettings: async (settings) => saveSettings(context, settings),
     validateApiKey: async (provider, apiKey, modelId) => validateApiKey(provider, apiKey, modelId),
     getProviderModels: async (provider) => PROVIDER_MODELS[provider] ?? [],
-    rerunRefinement: async (documentId) => {
-      const settings = loadSettings(context)
-      forceRequeueDocument(context, documentId, settings)
-    },
-    getRefiningDocumentIds: async () => getRefiningDocumentIds(context),
   }
 }
 
-function extractTextSample(document: DocumentRecord): string {
-  const words: string[] = []
-  const target = 500
-
-  for (const chapter of document.chapters) {
-    for (const block of chapter.content) {
-      if (block.text) {
-        words.push(...block.text.split(/\s+/))
-      } else if (block.items) {
-        words.push(...block.items.join(' ').split(/\s+/))
-      }
-
-      if (words.length >= target) {
-        return words.slice(0, target).join(' ')
-      }
-    }
-  }
-
-  return words.join(' ')
-}

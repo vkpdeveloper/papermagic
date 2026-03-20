@@ -1,8 +1,3 @@
-import { generateText, generateObject } from "ai";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { z } from "zod";
 import type { AppSettings } from "../src/types";
 
 export type AiProvider = "google" | "openai" | "anthropic";
@@ -35,66 +30,28 @@ export const PROVIDER_MODELS: Record<AiProvider, ProviderModel[]> = {
       label: "Gemini 3 Flash",
       description: "New fast and efficient",
     },
-    {
-      value: "gemini-3.1-pro-preview",
-      label: "Gemini 3.1 Pro",
-      description: "Most capable Google model",
-    },
   ],
   openai: [
     {
-      value: "gpt-5.4-nano",
-      label: "GPT-5.4 Nano",
-      description: "Cheapest and fastest - recommended",
+      value: "gpt-4o-mini",
+      label: "GPT-4o Mini",
+      description: "Fast and affordable — recommended",
     },
-    {
-      value: "gpt-5.4-mini",
-      label: "GPT-5.4 Mini",
-      description: "Fast and capable",
-    },
-    { value: "gpt-5.4", label: "GPT-5.4", description: "Flagship model" },
+    { value: "gpt-4o", label: "GPT-4o", description: "Most capable GPT model" },
   ],
   anthropic: [
     {
       value: "claude-haiku-4-5-20251001",
       label: "Claude Haiku 4.5",
-      description: "Fastest and most affordable - recommended",
+      description: "Fastest and most affordable — recommended",
     },
     {
       value: "claude-sonnet-4-6",
       label: "Claude Sonnet 4.6",
       description: "Best balance of speed and quality",
     },
-    {
-      value: "claude-opus-4-6",
-      label: "Claude Opus 4.6",
-      description: "Most capable Claude model",
-    },
   ],
 };
-
-function buildModel(provider: AiProvider, modelId: string, apiKey: string) {
-  switch (provider) {
-    case "google": {
-      const google = createGoogleGenerativeAI({ apiKey });
-      return google(modelId);
-    }
-    case "openai": {
-      const openai = createOpenAI({ apiKey });
-      return openai(modelId);
-    }
-    case "anthropic": {
-      const anthropic = createAnthropic({ apiKey });
-      return anthropic(modelId);
-    }
-  }
-}
-
-const titleSchema = z.object({
-  title: z
-    .string()
-    .describe("A concise, descriptive library card title for the document"),
-});
 
 export async function validateApiKey(
   provider: AiProvider,
@@ -102,57 +59,58 @@ export async function validateApiKey(
   modelId: string,
 ): Promise<boolean> {
   try {
-    const model = buildModel(provider, modelId, apiKey);
-    await generateText({
-      model,
-      prompt: "Reply with the single word: ok",
-      maxOutputTokens: 100,
-    });
-    return true;
+    if (provider === "google") {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: "ok" }] }] }),
+        },
+      );
+      return res.ok;
+    }
+    if (provider === "openai") {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: "user", content: "ok" }],
+          max_tokens: 5,
+        }),
+      });
+      return res.ok;
+    }
+    if (provider === "anthropic") {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: modelId,
+          max_tokens: 5,
+          messages: [{ role: "user", content: "ok" }],
+        }),
+      });
+      return res.ok;
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
+// Kept for potential future use; not called by current importers
 export async function generateDocumentTitle(
-  contentSample: string,
-  settings: AppSettings,
+  _contentSample: string,
+  _settings: AppSettings,
 ): Promise<string | null> {
-  if (
-    !settings.aiEnabled ||
-    !settings.aiProvider ||
-    !settings.aiModel ||
-    !settings.aiApiKey
-  ) {
-    return null;
-  }
-
-  try {
-    const model = buildModel(
-      settings.aiProvider as AiProvider,
-      settings.aiModel,
-      settings.aiApiKey,
-    );
-    const { object } = await generateObject({
-      model,
-      schema: titleSchema,
-      prompt: [
-        "You are a librarian. Based on the following text excerpt from a document, generate a concise and descriptive title for the document.",
-        "The title should be clear, specific, and suitable for a library card.",
-        "No quotes, no explanation, no punctuation at the end.",
-        "",
-        "Text excerpt:",
-        contentSample.slice(0, 2000),
-      ].join("\n"),
-      maxOutputTokens: 100,
-    });
-
-    const cleaned = object.title
-      .trim()
-      .replace(/^["']|["']$/g, "")
-      .trim();
-    return cleaned.length > 0 ? cleaned : null;
-  } catch {
-    return null;
-  }
+  return null;
 }

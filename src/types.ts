@@ -1,7 +1,7 @@
 export type AppMode = 'library' | 'reader'
 export type DocumentSource = 'pdf' | 'epub'
 export type ReadingMode = 'scroll' | 'page'
-export type ReaderBlockType = 'heading' | 'paragraph' | 'quote' | 'list' | 'code' | 'image' | 'math' | 'table'
+export type ReaderBlockType = 'heading' | 'paragraph' | 'quote' | 'list' | 'code' | 'image' | 'math' | 'table' | 'pdf-page'
 
 export interface ReaderBlock {
   id: string
@@ -13,6 +13,10 @@ export interface ReaderBlock {
   caption?: string
   src?: string
   language?: string
+  ordered?: boolean
+  pageNumber?: number
+  pageWidth?: number
+  pageHeight?: number
 }
 
 export interface Chapter {
@@ -118,32 +122,11 @@ export interface SearchResult {
 
 export type AiProvider = 'google' | 'openai' | 'anthropic'
 
-export type OllamaStatus = 'idle' | 'checking' | 'installing' | 'pulling' | 'starting' | 'ready' | 'error'
-
-export interface OllamaSetupProgress {
-  status: OllamaStatus
-  message: string
-  progress?: number // 0-100 for pull progress
-}
-
-export type RefinementStatus = 'pending' | 'processing' | 'done' | 'failed'
-
-export interface ChapterRefinementUpdate {
-  documentId: string
-  chapterId: string
-  refinedContent: ReaderBlock[]
-  status: RefinementStatus
-}
-
 export interface AppSettings {
   aiEnabled: boolean
   aiProvider: AiProvider | null
   aiModel: string | null
   aiApiKey: string | null
-  localAiEnabled: boolean
-  refinementProvider: 'local' | AiProvider
-  refinementModel: string
-  refinementApiKey: string | null
 }
 
 export interface PaperMagicApi {
@@ -162,9 +145,4 @@ export interface PaperMagicApi {
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
-  getOllamaStatus: () => Promise<OllamaSetupProgress>
-  onOllamaProgress: (callback: (progress: OllamaSetupProgress) => void) => () => void
-  onChapterRefined: (callback: (update: ChapterRefinementUpdate) => void) => () => void
-  rerunRefinement: (documentId: string) => Promise<void>
-  getRefiningDocumentIds: () => Promise<string[]>
 }

@@ -156,3 +156,27 @@ table {
 .table-row:hover .table-cell {
   background: rgba(255, 255, 255, 0.03);
 }
+
+/* ── EPUB prose typography ───────────────────────────────────────────────── */
+
+.epub-prose em,
+.epub-prose i {
+  font-style: italic;
+}
+
+.epub-prose strong,
+.epub-prose b {
+  font-weight: 600;
+}
+
+.epub-prose a {
+  color: var(--text-secondary);
+  text-underline-offset: 3px;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: rgba(248, 248, 243, 0.3);
+}
+
+.epub-prose a:hover {
+  text-decoration-color: rgba(248, 248, 243, 0.6);
+}
