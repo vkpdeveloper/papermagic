@@ -29,9 +29,11 @@
     "target": [
       "dmg"
     ],
+    "icon": "build/icon/icons/icon.icns",
     "artifactName": "${productName}-Mac-${version}-Installer.${ext}"
   },
   "win": {
+    "icon": "build/icon/icons/icon.ico",
     "target": [
       {
         "target": "nsis",
@@ -49,6 +51,7 @@
     "deleteAppDataOnUninstall": false
   },
   "linux": {
+    "icon": "build/icon/icons",
     "target": [
       "AppImage"
     ],
