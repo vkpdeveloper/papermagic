@@ -72,6 +72,10 @@ export const settingsTable = sqliteTable("app_settings", {
   ollamaSetupComplete: integer("ollama_setup_complete", { mode: "boolean" })
     .notNull()
     .default(false),
+  // Whether the Qwen WebLLM model has been fully downloaded and is ready
+  localAiModelReady: integer("local_ai_model_ready", { mode: "boolean" })
+    .notNull()
+    .default(false),
   refinementProvider: text("refinement_provider").notNull().default("google"),
   refinementModel: text("refinement_model")
     .notNull()

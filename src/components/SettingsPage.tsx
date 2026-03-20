@@ -5,6 +5,8 @@ import {
     Loader2 as Loader2Icon,
     Eye as EyeIcon,
     EyeOff as EyeOffIcon,
+    Download as DownloadIcon,
+    Cpu as CpuIcon,
 } from 'lucide-react'
 import type { AppSettings, AiProvider } from '../types'
 import { Select } from './ui/Select'
@@ -78,6 +80,7 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
         aiProvider: null,
         aiModel: null,
         aiApiKey: null,
+        localAiModelReady: false,
     })
     const [isLoading, setIsLoading] = useState(true)
     const [isSaving, setIsSaving] = useState(false)
@@ -85,6 +88,9 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
     const [keyValid, setKeyValid] = useState<boolean | null>(null)
     const [showKey, setShowKey] = useState(false)
     const [models, setModels] = useState<Array<{ value: string; label: string; description: string }>>([])
+    // Local AI model state
+    const [isDownloadingModel, setIsDownloadingModel] = useState(false)
+    const [modelDownloadProgress, setModelDownloadProgress] = useState<string | null>(null)
 
     useEffect(() => {
         if (!open) return
@@ -108,6 +114,27 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
 
         void load()
     }, [open])
+
+    // Register local model progress/ready listeners once
+    useEffect(() => {
+        window.paperMagic.onLocalModelProgress((progress) => {
+            if (progress.error) {
+                setIsDownloadingModel(false)
+                setModelDownloadProgress(null)
+                toast.error('Model download failed', { description: progress.error })
+                return
+            }
+            const pct = progress.progress != null ? ` (${Math.round(progress.progress * 100)}%)` : ''
+            setModelDownloadProgress(`${progress.message}${pct}`)
+        })
+        window.paperMagic.onLocalModelReady(() => {
+            setIsDownloadingModel(false)
+            setModelDownloadProgress(null)
+            setSettings((prev) => ({ ...prev, localAiModelReady: true }))
+            toast.success('Qwen model ready — PDFs will now be extracted as text')
+        })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
 
     const handleProviderChange = useCallback(async (provider: AiProvider) => {
         const providerModels = await window.paperMagic.getProviderModels(provider)
@@ -150,6 +177,18 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
         }
     }, [settings.aiProvider])
 
+    const handleDownloadModel = useCallback(async () => {
+        setIsDownloadingModel(true)
+        setModelDownloadProgress('Initialising…')
+        try {
+            await window.paperMagic.downloadLocalModel()
+        } catch {
+            setIsDownloadingModel(false)
+            setModelDownloadProgress(null)
+            toast.error('Failed to start model download')
+        }
+    }, [])
+
     const handleSave = useCallback(async () => {
         if (settings.aiEnabled && !settings.aiApiKey) {
             toast.error('API key required', { description: 'Enter your API key before saving.' })
@@ -184,6 +223,59 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
                 </div>
             ) : (
                 <div className="flex flex-col gap-5">
+                    {/* ── Local AI (PDF text extraction) ─────────────── */}
+                    <div>
+                        <h3 className="m-0 text-sm font-semibold text-text-primary">Local AI — PDF Text Extraction</h3>
+                        <p className="mt-1 text-xs text-text-muted leading-relaxed">
+                            Download the Qwen3-0.6B model (~300 MB) once to extract selectable, searchable text from PDFs instead of rendering them as images. Runs entirely on-device via WebGPU.
+                        </p>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-2">
+                            <CpuIcon size={14} className={settings.localAiModelReady ? 'text-[#4ade80]' : 'text-text-muted'} />
+                            <div>
+                                <p className="m-0 text-sm text-text-primary">
+                                    {settings.localAiModelReady ? 'Qwen model ready' : 'Qwen model not downloaded'}
+                                </p>
+                                {isDownloadingModel && modelDownloadProgress && (
+                                    <p className="m-0 mt-0.5 text-xs text-text-muted">{modelDownloadProgress}</p>
+                                )}
+                            </div>
+                        </div>
+                        {!settings.localAiModelReady && (
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                loading={isDownloadingModel}
+                                disabled={isDownloadingModel}
+                                onClick={() => void handleDownloadModel()}
+                            >
+                                {isDownloadingModel ? (
+                                    <>
+                                        <Loader2Icon size={13} className="animate-spin mr-1" />
+                                        Downloading…
+                                    </>
+                                ) : (
+                                    <>
+                                        <DownloadIcon size={13} className="mr-1" />
+                                        Download model
+                                    </>
+                                )}
+                            </Button>
+                        )}
+                        {settings.localAiModelReady && (
+                            <div className="flex items-center gap-1.5 text-xs text-[#4ade80]">
+                                <CheckCircleIcon size={12} strokeWidth={2} />
+                                <span>Ready</span>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="border-t border-border-subtle" />
+
+                    {/* ── Cloud AI ───────────────────────────────────── */}
                     <div>
                         <h3 className="m-0 text-sm font-semibold text-text-primary">Cloud AI</h3>
                         <p className="mt-1 text-xs text-text-muted leading-relaxed">

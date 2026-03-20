@@ -95,6 +95,14 @@ function ensureLocalAiColumns(connection: Database.Database): void {
   }
 }
 
+function ensureLocalAiModelReadyColumn(connection: Database.Database): void {
+  if (!tableHasColumn(connection, "app_settings", "local_ai_model_ready")) {
+    connection.exec(
+      "ALTER TABLE app_settings ADD COLUMN local_ai_model_ready INTEGER NOT NULL DEFAULT 0;",
+    );
+  }
+}
+
 function ensureRefinementColumns(connection: Database.Database): void {
   if (!tableHasColumn(connection, "app_settings", "refinement_provider")) {
     connection.exec(
@@ -254,6 +262,7 @@ function createTables(connection: Database.Database): void {
   ensureLocalAiColumns(connection);
   ensureChapterRefinementColumns(connection);
   ensureRefinementColumns(connection);
+  ensureLocalAiModelReadyColumn(connection);
 }
 
 export function createDatabaseContext(userDataPath: string): DatabaseContext {
@@ -680,6 +689,7 @@ const defaultSettings: AppSettings = {
   aiProvider: null,
   aiModel: null,
   aiApiKey: null,
+  localAiModelReady: false,
 };
 
 export function loadSettings(context: DatabaseContext): AppSettings {
@@ -698,6 +708,7 @@ export function loadSettings(context: DatabaseContext): AppSettings {
     aiProvider: (row.aiProvider as AppSettings["aiProvider"]) ?? null,
     aiModel: row.aiModel ?? null,
     aiApiKey: row.aiApiKey ?? null,
+    localAiModelReady: row.localAiModelReady ?? false,
   };
 }
 
@@ -713,6 +724,7 @@ export function saveSettings(
       aiProvider: settings.aiProvider ?? null,
       aiModel: settings.aiModel ?? null,
       aiApiKey: settings.aiApiKey ?? null,
+      localAiModelReady: settings.localAiModelReady ?? false,
     })
     .onConflictDoUpdate({
       target: settingsTable.id,
@@ -721,6 +733,7 @@ export function saveSettings(
         aiProvider: settings.aiProvider ?? null,
         aiModel: settings.aiModel ?? null,
         aiApiKey: settings.aiApiKey ?? null,
+        localAiModelReady: settings.localAiModelReady ?? false,
       },
     })
     .run();

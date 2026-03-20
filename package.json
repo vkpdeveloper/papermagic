@@ -33,6 +33,7 @@
         "@tanstack/react-hotkeys": "^0.4.1",
         "better-sqlite3": "^12.8.0",
         "drizzle-orm": "^0.45.1",
+        "extract2md": "^2.0.0",
         "fast-xml-parser": "^5.5.6",
         "jszip": "^3.10.1",
         "linkedom": "^0.18.12",

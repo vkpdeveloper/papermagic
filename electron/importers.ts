@@ -10,9 +10,11 @@ import {
   UNREADABLE_IMPORT_MESSAGE,
   buildDocument,
   createId,
+  markdownToBlocks,
   splitBlocksIntoChapters,
 } from '../src/content'
 import type { Chapter, DocumentRecord, ReaderBlock } from '../src/types'
+import { extractPdfToMarkdown } from './pdf-extractor-window'
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -334,12 +336,12 @@ function extractOutlineEntries(outline: OutlineItem[] | null): OutlineEntry[] {
   return entries
 }
 
-// ─── Top-level PDF importer ───────────────────────────────────────────────────
+// ─── Top-level PDF importer (image rendering — kept as fallback) ──────────────
 
 // Render scale for page images: 1.8× gives ~130 DPI for a US-letter page (~1530px wide)
 const PDF_RENDER_SCALE = 1.8
 
-async function importPdf(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
+export async function importPdfAsImages(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
   const extension = path.extname(filePath)
   const sourceCopyPath = path.join(cacheDirectory, `source${extension || '.pdf'}`)
   const pdfBuffer = await fs.readFile(filePath)
@@ -1036,6 +1038,78 @@ async function importEpub(filePath: string, cacheDirectory: string): Promise<Doc
   })
 }
 
+// ─── New PDF importer: text extraction via WebLLM (Qwen) ─────────────────────
+
+/**
+ * Import a PDF by extracting its text content as Markdown using
+ * Extract2MD + WebLLM (Qwen3-0.6B) running in a hidden renderer window.
+ *
+ * The resulting document has rich text blocks (headings, paragraphs, code,
+ * tables, etc.) instead of page images, giving a proper reading experience
+ * with selectable/searchable text.
+ *
+ * Falls back gracefully: if extraction fails, the error is re-thrown so the
+ * caller can decide whether to use importPdfAsImages instead.
+ */
+async function importPdfAsMarkdown(filePath: string, cacheDirectory: string): Promise<DocumentRecord> {
+  const extension = path.extname(filePath)
+  const sourceCopyPath = path.join(cacheDirectory, `source${extension || '.pdf'}`)
+  const pdfBuffer = await fs.readFile(filePath)
+  await fs.writeFile(sourceCopyPath, pdfBuffer)
+
+  // We still open with MuPDF to get the cover thumbnail and metadata cheaply —
+  // we don't rasterize any content pages.
+  const doc = mupdf.Document.openDocument(pdfBuffer, 'application/pdf')
+  const coverImageUrl = renderMuPageAsCover(doc, cacheDirectory)
+
+  const rawTitle = doc.getMetaData(mupdf.Document.META_INFO_TITLE) ?? ''
+  const rawAuthor = doc.getMetaData(mupdf.Document.META_INFO_AUTHOR) ?? ''
+  const fallbackTitle = friendlyFilenameTitle(path.basename(filePath, extension)) || 'Imported PDF'
+
+  // Send the PDF to the hidden extractor window for WebLLM-based text extraction
+  const pdfBase64 = pdfBuffer.toString('base64')
+  const markdown = await extractPdfToMarkdown(pdfBase64)
+
+  // Parse the returned Markdown into structured blocks
+  const blocks = markdownToBlocks(markdown)
+  const chapters = splitBlocksIntoChapters(
+    fallbackTitle,
+    blocks.length > 0 ? blocks : [
+      {
+        id: createId('block'),
+        type: 'heading',
+        level: 2,
+        text: fallbackTitle,
+      },
+      {
+        id: createId('block'),
+        type: 'paragraph',
+        text: UNREADABLE_IMPORT_MESSAGE,
+      },
+    ],
+  )
+
+  const title = normalizeWhitespace(rawTitle) || fallbackTitle
+  const author = normalizeWhitespace(rawAuthor) || 'PDF import'
+
+  return buildDocument({
+    id: path.basename(cacheDirectory),
+    title,
+    author,
+    description: 'PDF text extracted via WebLLM (Qwen).',
+    sourceType: 'pdf',
+    preferredMode: 'page',
+    originLabel: filePath,
+    extractedWith: 'Extract2MD + Qwen (WebLLM)',
+    chapters,
+    metadata: {
+      coverImageUrl,
+      sourcePath: filePath,
+      cacheDirectory,
+    },
+  })
+}
+
 export async function importDocumentFromPath(
   filePath: string,
   libraryRoot: string,
@@ -1046,7 +1120,14 @@ export async function importDocumentFromPath(
   const cacheDirectory = await createCacheDirectory(libraryRoot, documentId)
 
   if (extension === '.pdf') {
-    return importPdf(filePath, cacheDirectory)
+    // Try the new WebLLM-based markdown extraction first.
+    // If it fails (model not downloaded yet, WebGPU unavailable, etc.),
+    // fall back transparently to the original image rendering path.
+    try {
+      return await importPdfAsMarkdown(filePath, cacheDirectory)
+    } catch {
+      return importPdfAsImages(filePath, cacheDirectory)
+    }
   }
 
   if (extension === '.epub') {

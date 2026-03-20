@@ -36,6 +36,7 @@ export interface LibraryStore {
   removeBookmark: (bookmarkId: string) => Promise<void>
   loadSettings: () => Promise<AppSettings>
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
+  markLocalModelReady: () => Promise<void>
   validateApiKey: (provider: AiProvider, apiKey: string, modelId: string) => Promise<boolean>
   getProviderModels: (provider: AiProvider) => Promise<Array<{ value: string; label: string; description: string }>>
 }
@@ -139,6 +140,10 @@ export function createLibraryStore(userDataPath: string): LibraryStore {
     },
     loadSettings: async () => loadSettings(context),
     saveSettings: async (settings) => saveSettings(context, settings),
+    markLocalModelReady: async () => {
+      const current = loadSettings(context)
+      saveSettings(context, { ...current, localAiModelReady: true })
+    },
     validateApiKey: async (provider, apiKey, modelId) => validateApiKey(provider, apiKey, modelId),
     getProviderModels: async (provider) => PROVIDER_MODELS[provider] ?? [],
   }

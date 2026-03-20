@@ -18,6 +18,17 @@ const electronRuntimeDependencies = [
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  // Multi-page renderer build: main app + hidden PDF extractor window.
+  // This ensures src/pdf-extractor-worker.ts is bundled by Vite so
+  // bare module imports (e.g. 'extract2md') resolve correctly at runtime.
+  build: {
+    rollupOptions: {
+      input: {
+        index: path.join(__dirname, 'index.html'),
+        'pdf-extractor': path.join(__dirname, 'pdf-extractor.html'),
+      },
+    },
+  },
   plugins: [
     tailwindcss(),
     react(),
@@ -36,7 +47,10 @@ export default defineConfig({
       preload: {
         // Shortcut of `build.rollupOptions.input`.
         // Preload scripts may contain Web assets, so use the `build.rollupOptions.input` instead `build.lib.entry`.
-        input: path.join(__dirname, 'electron/preload.ts'),
+        input: {
+          preload: path.join(__dirname, 'electron/preload.ts'),
+          'pdf-extractor-preload': path.join(__dirname, 'electron/pdf-extractor-preload.ts'),
+        },
       },
       // Ployfill the Electron and Node.js API for Renderer process.
       // If you want use Node.js in Renderer process, the `nodeIntegration` needs to be enabled in the Main process.
