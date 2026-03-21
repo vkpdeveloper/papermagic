@@ -1,7 +1,7 @@
 {
     "name": "papermagic",
     "private": true,
-    "version": "1.0.5",
+    "version": "1.0.6",
     "description": "Offline-first desktop reader for PDFs, EPUBs, and saved web pages.",
     "author": "Vaibhav",
     "type": "module",
