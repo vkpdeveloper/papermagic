@@ -7,16 +7,27 @@
 @variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --font-ui: 'Inter', 'Segoe UI', sans-serif;
-  --font-reading: 'Inter', 'Segoe UI', sans-serif;
+  --font-ui: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-reading: 'Inter', 'Segoe UI', system-ui, sans-serif;
   --font-display: 'Poppins', 'Inter', sans-serif;
-  --font-mono: 'JetBrains Mono', 'SFMono-Regular', monospace;
+  --font-mono: 'JetBrains Mono', 'Menlo', 'SFMono-Regular', monospace;
+
+  /* ── Surface hierarchy ── pure black foundation */
   --color-bg-page: #000000;
-  --color-text-primary: #f8f8f3;
-  --color-text-secondary: rgba(248, 248, 243, 0.82);
-  --color-text-muted: rgba(248, 248, 243, 0.58);
-  --color-border-subtle: rgba(255, 255, 255, 0.08);
-  --color-border-strong: rgba(255, 255, 255, 0.18);
+  --color-bg-surface: #070707;
+  --color-bg-raised: #0d0d0d;
+
+  /* ── Crystalline text hierarchy */
+  --color-text-primary: #f0f0eb;
+  --color-text-secondary: rgba(240, 240, 235, 0.70);
+  --color-text-muted: rgba(240, 240, 235, 0.42);
+  --color-text-faint: rgba(240, 240, 235, 0.24);
+
+  /* ── Sharp border system */
+  --color-border-faint: rgba(255, 255, 255, 0.045);
+  --color-border-subtle: rgba(255, 255, 255, 0.085);
+  --color-border-medium: rgba(255, 255, 255, 0.13);
+  --color-border-strong: rgba(255, 255, 255, 0.20);
 }
 
 :root {
@@ -25,16 +36,22 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  --font-ui: 'Inter', 'Segoe UI', sans-serif;
-  --font-reading: 'Inter', 'Segoe UI', sans-serif;
+  font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1, 'ss01' 1;
+  --font-ui: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-reading: 'Inter', 'Segoe UI', system-ui, sans-serif;
   --font-display: 'Poppins', 'Inter', sans-serif;
-  --font-mono: 'JetBrains Mono', 'SFMono-Regular', monospace;
+  --font-mono: 'JetBrains Mono', 'Menlo', 'SFMono-Regular', monospace;
   --bg-page: #000000;
-  --text-primary: #f8f8f3;
-  --text-secondary: rgba(248, 248, 243, 0.82);
-  --text-muted: rgba(248, 248, 243, 0.58);
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.18);
+  --bg-surface: #070707;
+  --bg-raised: #0d0d0d;
+  --text-primary: #f0f0eb;
+  --text-secondary: rgba(240, 240, 235, 0.70);
+  --text-muted: rgba(240, 240, 235, 0.42);
+  --text-faint: rgba(240, 240, 235, 0.24);
+  --border-faint: rgba(255, 255, 255, 0.045);
+  --border-subtle: rgba(255, 255, 255, 0.085);
+  --border-medium: rgba(255, 255, 255, 0.13);
+  --border-strong: rgba(255, 255, 255, 0.20);
 }
 
 * {
@@ -73,32 +90,34 @@ input:focus-visible {
 
 .inline-code {
   font-family: var(--font-mono);
-  font-size: 0.85em;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
+  font-size: 0.84em;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 0;
   padding: 1px 5px;
-  color: #e2c08d;
+  color: #d4a96a;
+  letter-spacing: -0.01em;
 }
 
 /* ── Code block styling ───────────────────────────────────────────────────── */
 
 .code-block {
-  border-radius: 10px;
+  border-radius: 0;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.09);
   font-family: var(--font-mono);
   font-size: 0.875em;
 }
 
 .code-block-header {
   padding: 8px 16px;
-  font-size: 0.78em;
+  font-size: 0.76em;
   font-family: var(--font-ui);
-  letter-spacing: 0.04em;
-  background: rgba(255, 255, 255, 0.06);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.04);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  color: rgba(248, 248, 243, 0.5);
+  color: rgba(240, 240, 235, 0.40);
 }
 
 .code-block-body {
@@ -121,9 +140,9 @@ input:focus-visible {
 /* ── Table styling ────────────────────────────────────────────────────────── */
 
 .table-wrapper {
-  border-radius: 10px;
+  border-radius: 0;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.09);
   font-size: 0.9em;
 }
 
@@ -136,17 +155,17 @@ table {
 .table-cell {
   padding: 10px 16px;
   text-align: left;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .table-header-cell {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
   font-weight: 600;
-  color: rgba(248, 248, 243, 0.9);
-  font-size: 0.82em;
-  letter-spacing: 0.03em;
+  color: rgba(240, 240, 235, 0.88);
+  font-size: 0.80em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
 }
 
 .table-row:last-child .table-cell {
@@ -154,7 +173,7 @@ table {
 }
 
 .table-row:hover .table-cell {
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.025);
 }
 
 /* ── EPUB prose typography ───────────────────────────────────────────────── */
@@ -166,7 +185,8 @@ table {
 
 .epub-prose strong,
 .epub-prose b {
-  font-weight: 600;
+  font-weight: 650;
+  color: rgba(240, 240, 235, 0.96);
 }
 
 .epub-prose a {
@@ -174,9 +194,55 @@ table {
   text-underline-offset: 3px;
   text-decoration: underline;
   text-decoration-thickness: 1px;
-  text-decoration-color: rgba(248, 248, 243, 0.3);
+  text-decoration-color: rgba(240, 240, 235, 0.24);
 }
 
 .epub-prose a:hover {
-  text-decoration-color: rgba(248, 248, 243, 0.6);
+  text-decoration-color: rgba(240, 240, 235, 0.55);
+}
+
+/* ── Reading progress bar ────────────────────────────────────────────────── */
+
+.reading-progress-bar {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.07);
+  position: relative;
+}
+
+.reading-progress-bar-fill {
+  height: 100%;
+  background: rgba(240, 240, 235, 0.60);
+  transition: width 300ms ease;
+}
+
+/* ── Custom scrollbars (webkit) ──────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ── Typographic scale for the reading area ──────────────────────────────── */
+
+/* Ensure headings in reading area use optical sizing */
+.epub-prose h1,
+.epub-prose h2,
+.epub-prose h3,
+.epub-prose h4,
+.epub-prose h5,
+.epub-prose h6 {
+  font-feature-settings: 'kern' 1, 'liga' 1;
+  letter-spacing: -0.02em;
 }

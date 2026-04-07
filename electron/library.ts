@@ -85,17 +85,16 @@ export function createLibraryStore(
       return loadState(context)
     },
     importPaths: async (paths) => {
+      const CONCURRENCY = 3
       const importedDocuments: DocumentRecord[] = []
 
-      for (const filePath of paths) {
+      async function importOnePath(filePath: string): Promise<void> {
         const existingDocumentId = findExistingDocumentBySource(context, filePath, filePath)
-
-        if (existingDocumentId) {
-          continue
-        }
+        if (existingDocumentId) return
 
         // Resolve with the stub as soon as the first onUpdate fires (cover + title ready),
         // then continue extraction in the background, streaming each page into the DB.
+        // For EPUBs (which never call onUpdate), resolve with the final doc instead.
         let isFirst = true
         let resolveStub!: (doc: DocumentRecord) => void
         let rejectStub!: (err: unknown) => void
@@ -116,7 +115,13 @@ export function createLibraryStore(
           },
         }).then((finalDoc) => {
           upsertDocument(context, finalDoc)
-          options?.onDocumentUpdate?.(finalDoc)
+          if (isFirst) {
+            // EPUB path: onUpdate never fires, so resolve the stub with the completed doc
+            isFirst = false
+            resolveStub(finalDoc)
+          } else {
+            options?.onDocumentUpdate?.(finalDoc)
+          }
         }).catch((err) => {
           if (isFirst) {
             isFirst = false
@@ -131,6 +136,20 @@ export function createLibraryStore(
           // Import failed before producing any content — skip silently
         }
       }
+
+      // Run up to CONCURRENCY imports at a time so multiple files process in parallel.
+      const queue = [...paths]
+      async function runWorker(): Promise<void> {
+        while (queue.length > 0) {
+          const filePath = queue.shift()
+          if (filePath === undefined) break
+          await importOnePath(filePath)
+        }
+      }
+
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, paths.length) }, runWorker),
+      )
 
       return importedDocuments
     },

@@ -1,5 +1,4 @@
 import fs from 'node:fs/promises'
-import fsSync from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import JSZip from 'jszip'
@@ -258,7 +257,7 @@ function textFromXmlValue(value: unknown): string {
 
 // ─── Cover image ─────────────────────────────────────────────────────────────
 
-function renderMuPageAsCover(doc: InstanceType<typeof mupdf.Document>, cacheDirectory: string): string | undefined {
+async function renderMuPageAsCover(doc: InstanceType<typeof mupdf.Document>, cacheDirectory: string): Promise<string | undefined> {
   const pageCount = doc.countPages()
 
   for (const pageIndex of [0, 1]) {
@@ -289,7 +288,7 @@ function renderMuPageAsCover(doc: InstanceType<typeof mupdf.Document>, cacheDire
 
     const jpegBytes = pixmap.asJPEG(85)
     const coverPath = path.join(cacheDirectory, 'cover.jpg')
-    fsSync.writeFileSync(coverPath, jpegBytes)
+    await fs.writeFile(coverPath, jpegBytes)
     return pathToFileURL(coverPath).toString()
   }
 
@@ -353,7 +352,7 @@ export async function importPdfAsImages(
   const pageCount = doc.countPages()
 
   // Cover thumbnail
-  const coverImageUrl = renderMuPageAsCover(doc, cacheDirectory)
+  const coverImageUrl = await renderMuPageAsCover(doc, cacheDirectory)
 
   // Metadata
   const rawTitle = doc.getMetaData(mupdf.Document.META_INFO_TITLE) ?? ''
@@ -412,6 +411,10 @@ export async function importPdfAsImages(
   // Send initial stub (cover + title visible, no pages yet)
   if (onUpdate) onUpdate(buildCurrentDoc())
 
+  // Fire onUpdate at most every UPDATE_EVERY pages to reduce IPC overhead.
+  // The initial call above already resolved the stub; subsequent calls stream pages in.
+  const UPDATE_EVERY = Math.max(1, Math.ceil(pageCount / 20))
+
   // Render each page as a JPEG image
   for (let i = 0; i < pageCount; i++) {
     const page = doc.loadPage(i)
@@ -423,7 +426,7 @@ export async function importPdfAsImages(
     const jpegBytes = pixmap.asJPEG(88)
     const fileName = `page-${String(i + 1).padStart(4, '0')}.jpg`
     const imagePath = path.join(cacheDirectory, fileName)
-    fsSync.writeFileSync(imagePath, jpegBytes)
+    await fs.writeFile(imagePath, jpegBytes)
     const block: ReaderBlock = {
       id: createId('block'),
       type: 'pdf-page',
@@ -441,7 +444,9 @@ export async function importPdfAsImages(
     }
     targetChapter.content.push(block)
 
-    if (onUpdate) onUpdate(buildCurrentDoc())
+    if (onUpdate && ((i + 1) % UPDATE_EVERY === 0 || i === pageCount - 1)) {
+      onUpdate(buildCurrentDoc())
+    }
     await delay()
   }
 

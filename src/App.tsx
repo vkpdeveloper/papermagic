@@ -32,6 +32,7 @@ import {
   Moon as MoonIcon,
   Sun as SunIcon,
   RotateCcw as FitWidthIcon,
+  Clock as ClockIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { buildSearchResults, isUtilityHeading } from './content'
@@ -188,7 +189,7 @@ function renderWithHighlights(text: string, highlights: Highlight[], documentId:
       return <span key={`${blockId}-${index}`}>{part}</span>
     }
 
-    return <mark key={`${blockId}-${index}`} className="px-[0.14em] py-[0.06em] bg-white/[0.16] text-text-primary">{part}</mark>
+    return <mark key={`${blockId}-${index}`} className="px-[0.14em] py-[0.04em] bg-white/[0.18] text-text-primary">{part}</mark>
   })
 }
 
@@ -328,8 +329,8 @@ function renderWithSearchMatches(text: string, searchQuery: string, isActive: bo
         key={index}
         className={
           isActive
-            ? 'bg-[rgba(255,200,60,0.72)] text-[#000] rounded-[2px] px-[0.1em] py-[0.05em]'
-            : 'bg-[rgba(255,200,60,0.28)] text-text-primary rounded-[2px] px-[0.1em] py-[0.05em]'
+            ? 'bg-[rgba(255,200,60,0.72)] text-[#000] px-[0.12em] py-[0.04em]'
+            : 'bg-[rgba(255,200,60,0.24)] text-text-primary px-[0.12em] py-[0.04em]'
         }
       >
         {part}
@@ -692,7 +693,7 @@ const ReaderBlockView = memo(function ReaderBlockView(props: {
       }
       return (
         <p
-          className={`${blockBase} tracking-[0.01em]`}
+          className={`${blockBase} tracking-[0.012em]`}
           data-chapter-id={chapterId}
           data-block-id={block.id}
         >
@@ -727,7 +728,10 @@ function App() {
   const [expandedTocChapters, setExpandedTocChapters] = useState<string[]>([])
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [isSidebarTitleEditing, setIsSidebarTitleEditing] = useState(false)
+  const [sidebarTitleValue, setSidebarTitleValue] = useState('')
   const readerRef = useRef<HTMLDivElement | null>(null)
+  const sidebarTitleInputRef = useRef<HTMLInputElement | null>(null)
   const progressSaveTimerRef = useRef<number | null>(null)
   const preferenceSaveTimerRef = useRef<number | null>(null)
   const pendingScrollRestoreRef = useRef(false)
@@ -807,6 +811,7 @@ function App() {
 
   useEffect(() => {
     setExpandedTocChapters([])
+    setIsSidebarTitleEditing(false)
   }, [activeDocumentId])
 
 
@@ -1122,18 +1127,22 @@ function App() {
   }
 
   const jumpToLocation = (chapterId: string, blockId: string) => {
-    if (!activeDocument) {
+    if (!activeDocument || !readerRef.current) {
       return
     }
 
-    const target = readerRef.current?.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`)
+    const readerEl = readerRef.current
+    const target = readerEl.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`)
     if (!target) {
       return
     }
 
-    target.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
+    // With content-visibility:auto, off-screen elements have estimated sizes.
+    // Instant scroll forces the browser to lay out the target with real dimensions,
+    // then a rAF smooth-scroll lands at the correct position.
+    target.scrollIntoView({ block: 'start' })
+    requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
 
     queueProgressSave({
@@ -1666,42 +1675,38 @@ function App() {
   const tocGroups = useMemo(() => buildTocGroups(activeDocument), [activeDocument])
 
   // Shared list-item classes for TOC items, annotation items
-  const listItemBase = 'w-full px-[13px] py-3 text-left bg-white/[0.02] border border-border-subtle text-text-primary transition-[border-color,background,transform] duration-[160ms] cursor-pointer border-0 font-[inherit] outline-none'
-  const listItemHover = 'hover:border-border-strong hover:bg-white/[0.04]'
-  const listItemActive = 'border-border-strong! bg-white/[0.06]'
+  const listItemBase = 'w-full px-[12px] py-[10px] text-left text-text-primary transition-[background,color] duration-[140ms] cursor-pointer font-[inherit] outline-none text-sm'
+  const listItemHover = 'hover:bg-white/[0.05] hover:text-text-primary'
+  const listItemActive = 'bg-white/[0.07] text-text-primary'
 
   if (isBootstrapping) {
     return (
-      <div className="min-h-screen text-text-primary bg-bg-page">
-        <main className="w-[min(1120px,calc(100vw-48px))] mx-auto py-7 pb-[88px]">
-          <section className="border border-border-subtle bg-[#000] p-6">
-            <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted">Paper Magic</p>
-            <h1 className="m-0 max-w-[13ch] text-[clamp(2rem,4.5vw,3.4rem)] font-display font-bold leading-[0.98] tracking-[-0.045em]">
-              Loading your offline reading library.
-            </h1>
-            <p className="max-w-[44ch] mt-[14px] text-text-muted">
-              Opening the local database and restoring your reading state.
-            </p>
-          </section>
-        </main>
+      <div className="min-h-screen text-text-primary bg-bg-page flex items-center justify-center">
+        <div className="w-[min(480px,calc(100vw-48px))]">
+          <p className="m-0 mb-[8px] uppercase tracking-[0.20em] text-[0.60rem] text-text-faint font-ui font-semibold">Paper Magic</p>
+          <h1 className="m-0 text-[1.8rem] font-display font-bold leading-[1.02] tracking-[-0.04em] mb-3">
+            Loading library…
+          </h1>
+          <p className="text-text-muted text-sm leading-[1.6]">
+            Opening the local database and restoring your reading state.
+          </p>
+        </div>
       </div>
     )
   }
 
   if (loadError || !persistedState) {
     return (
-      <div className="min-h-screen text-text-primary bg-bg-page">
-        <main className="w-[min(1120px,calc(100vw-48px))] mx-auto py-7 pb-[88px]">
-          <section className="border border-border-subtle bg-[#000] p-6">
-            <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted">Paper Magic</p>
-            <h1 className="m-0 max-w-[13ch] text-[clamp(2rem,4.5vw,3.4rem)] font-display font-bold leading-[0.98] tracking-[-0.045em]">
-              Local library unavailable.
-            </h1>
-            <p className="max-w-[44ch] mt-[14px] text-text-muted">
-              {loadError ?? 'The application state could not be initialized.'}
-            </p>
-          </section>
-        </main>
+      <div className="min-h-screen text-text-primary bg-bg-page flex items-center justify-center">
+        <div className="w-[min(480px,calc(100vw-48px))]">
+          <p className="m-0 mb-[8px] uppercase tracking-[0.20em] text-[0.60rem] text-text-faint font-ui font-semibold">Paper Magic</p>
+          <h1 className="m-0 text-[1.8rem] font-display font-bold leading-[1.02] tracking-[-0.04em] mb-3">
+            Library unavailable
+          </h1>
+          <p className="text-text-muted text-sm leading-[1.6]">
+            {loadError ?? 'The application state could not be initialized.'}
+          </p>
+        </div>
       </div>
     )
   }
@@ -1742,26 +1747,26 @@ function App() {
       {isDragging ? <DropOverlay /> : null}
 
       {mode === 'library' ? (
-        <main className="w-[min(1120px,calc(100vw-48px))] mx-auto pt-7 pb-[88px] max-sm:w-[min(calc(100vw-24px),1120px)] max-sm:pt-5">
+        <main className="w-[min(1200px,calc(100vw-48px))] mx-auto pt-8 pb-[88px] max-sm:w-[min(calc(100vw-24px),1200px)] max-sm:pt-5">
           {/* Library header */}
-          <section className="flex justify-between items-end gap-[18px] mb-5 max-sm:items-start">
+          <section className="flex justify-between items-center gap-[18px] mb-6 max-sm:items-start pb-5 border-b border-border-subtle">
             <div>
-              <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted">Paper Magic</p>
-              <h1 className="m-0 text-[clamp(2rem,5vw,3rem)] font-display font-bold leading-[0.94] tracking-[-0.05em]">
+              <p className="m-0 mb-[6px] uppercase tracking-[0.20em] text-[0.60rem] text-text-faint font-ui font-semibold">Paper Magic</p>
+              <h1 className="m-0 text-[clamp(1.8rem,4.5vw,2.6rem)] font-display font-bold leading-[0.96] tracking-[-0.05em]">
                 Library
               </h1>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-[6px] shrink-0">
               <Button
-                variant="icon"
-                size="md"
-                className="border border-border-subtle"
+                variant="secondary"
+                size="sm"
                 type="button"
                 onClick={() => void handleImportDialog()}
                 disabled={isImporting}
                 aria-label="Import files"
               >
-                {isImporting ? <Spinner className="size-4" /> : <UploadIcon size={16} strokeWidth={1.9} />}
+                {isImporting ? <Spinner className="size-4" /> : <UploadIcon size={13} strokeWidth={2} aria-hidden="true" />}
+                Import
               </Button>
               <Button
                 variant="icon"
@@ -1771,48 +1776,64 @@ function App() {
                 onClick={() => setIsSettingsOpen(true)}
                 aria-label="Open settings"
               >
-                <SettingsIcon size={16} strokeWidth={1.9} />
+                <SettingsIcon size={15} strokeWidth={1.9} />
               </Button>
             </div>
           </section>
 
           {/* Empty state */}
           {persistedState.documents.length === 0 ? (
-            <section className="border border-border-subtle bg-[#000] p-6">
-              <div className="flex justify-between gap-4 items-baseline mb-3">
-                <h2 className="m-0 text-base font-display font-semibold">Empty library</h2>
-                <span className="text-text-muted text-[0.95rem]">Start with one import</span>
-              </div>
-              <p className="max-w-[44ch] text-text-muted">Drop a PDF or EPUB.</p>
+            <section className="border border-border-subtle p-8">
+              <p className="m-0 mb-3 text-[0.68rem] tracking-[0.18em] uppercase text-text-muted">Empty library</p>
+              <h2 className="m-0 mb-4 text-[1.6rem] font-display font-bold leading-[1.0] tracking-[-0.04em]">
+                No documents yet.
+              </h2>
+              <p className="max-w-[38ch] text-text-muted leading-[1.6] mb-6">
+                Import a PDF or EPUB to begin. Your library stays offline — nothing leaves your machine.
+              </p>
+              <Button
+                variant="secondary"
+                size="md"
+                onClick={() => void handleImportDialog()}
+                disabled={isImporting}
+              >
+                {isImporting ? <Spinner className="size-4" /> : <UploadIcon size={15} strokeWidth={1.9} aria-hidden="true" />}
+                Import file
+              </Button>
             </section>
           ) : null}
 
           {/* Library section */}
           {libraryDocuments.length > 0 ? (
-            <section className="mt-[18px]">
-              <div className="flex justify-between gap-4 items-baseline mb-3 max-sm:flex-col max-sm:items-stretch">
-                <div className="grid gap-1">
-                  <h2 className="m-0 text-base font-display font-semibold">Library</h2>
-                  <span className="text-text-muted text-[0.95rem]">{filteredLibraryDocuments.length} items</span>
+            <section className="mt-5">
+              <div className="flex justify-between gap-4 items-center mb-4 max-sm:flex-col max-sm:items-stretch">
+                <div className="flex items-baseline gap-3">
+                  <h2 className="m-0 text-[0.78rem] font-ui font-semibold tracking-[0.12em] uppercase text-text-muted">
+                    Library
+                  </h2>
+                  <span className="text-text-faint text-[0.72rem] tabular-nums">
+                    {filteredLibraryDocuments.length} {filteredLibraryDocuments.length === 1 ? 'item' : 'items'}
+                  </span>
                 </div>
                 <Input
                   ref={librarySearchRef}
                   size="md"
                   prefix={<SearchIcon size={15} strokeWidth={1.9} aria-hidden="true" />}
-                  wrapperClassName="w-[min(100%,320px)] max-sm:w-full"
+                  wrapperClassName="w-[min(100%,300px)] max-sm:w-full"
                   value={librarySearchQuery}
                   onChange={(event) => setLibrarySearchQuery(event.target.value)}
-                  placeholder="Search title, author, or source"
+                  placeholder="Search title, author…"
                 />
               </div>
               {filteredLibraryDocuments.length > 0 ? (
-                <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 max-sm:grid-cols-2">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-px bg-border-subtle border border-border-subtle max-sm:grid-cols-2">
                   {filteredLibraryDocuments.map((document) => {
                     const progress = persistedState.progress.find((item) => item.documentId === document.id)
                     const coverImageUrl = resolveDocumentCoverImage(document)
                     const progressValue = progress?.progress ?? 0
                     const progressWidth = `${Math.max(0, Math.min(100, progressValue * 100))}%`
                     const isDeletingDocument = deletingDocumentIds.includes(document.id)
+                    const readingMins = document.metadata.estimatedMinutes
                     return (
                       <ContextMenu
                         key={document.id}
@@ -1836,7 +1857,7 @@ function App() {
                         ]}
                       >
                       <article
-                        className={`border border-border-subtle bg-[#000] grid grid-rows-[auto_minmax(0,1fr)] gap-[14px] min-h-[420px] h-full p-3 text-left transition-[border-color,background] duration-[160ms] cursor-pointer hover:border-border-strong hover:bg-[#050505] ${isDeletingDocument ? 'opacity-70 pointer-events-none' : ''}`}
+                        className={`bg-bg-page grid grid-rows-[auto_minmax(0,1fr)] h-full p-0 text-left transition-[background] duration-[140ms] cursor-pointer hover:bg-bg-surface ${isDeletingDocument ? 'opacity-60 pointer-events-none' : ''}`}
                         onClick={() => {
                           if (!isDeletingDocument) {
                             openDocument(document.id)
@@ -1845,7 +1866,7 @@ function App() {
                       >
                         {/* Cover art */}
                         <div
-                          className={`relative min-h-0 aspect-[0.76] p-[14px] border border-white/[0.06] flex flex-col justify-between overflow-hidden ${coverImageUrl ? '' : ''}`}
+                          className="relative min-h-0 aspect-[0.72] overflow-hidden"
                           style={coverImageUrl ? undefined : coverStyle(document)}
                         >
                           {coverImageUrl ? (
@@ -1856,32 +1877,45 @@ function App() {
                                 alt={`Cover for ${document.title}`}
                                 loading="lazy"
                               />
-                              <div className="absolute inset-0 bg-gradient-to-b from-black/[0.12] via-black/[0.2] to-black/[0.9]" />
+                              <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/[0.15] to-black/[0.85]" />
                             </>
                           ) : null}
-                          <span className="relative z-[1] inline-flex self-start items-center gap-1.5 px-2 py-[5px] border border-white/[0.12] bg-black/40 text-white/[0.82] text-[0.72rem] tracking-[0.08em] uppercase">
-                            <SourceIcon sourceType={document.sourceType} size={14} strokeWidth={1.9} />
+                          {/* Format badge — top left */}
+                          <span className="absolute top-[10px] left-[10px] z-[1] inline-flex items-center gap-1 px-[7px] py-[4px] border border-white/[0.15] bg-black/50 text-white/[0.78] text-[0.66rem] tracking-[0.10em] uppercase font-ui">
+                            <SourceIcon sourceType={document.sourceType} size={11} strokeWidth={2} />
                             {sourceLabel(document.sourceType)}
                           </span>
+                          {/* Reading time — bottom left */}
+                          {readingMins > 0 ? (
+                            <span className="absolute bottom-[10px] left-[10px] z-[1] inline-flex items-center gap-1 px-[7px] py-[4px] border border-white/[0.12] bg-black/50 text-white/[0.65] text-[0.64rem] tracking-[0.08em] uppercase font-ui">
+                              <ClockIcon size={10} strokeWidth={2} aria-hidden="true" />
+                              {readingMins < 60 ? `${readingMins}m` : `${Math.round(readingMins / 60)}h`}
+                            </span>
+                          ) : null}
                         </div>
                         {/* Document meta */}
-                        <div className="min-w-0 flex flex-col gap-[10px]">
-                          <div className="flex items-start justify-between gap-[10px]">
-                            <p className="m-0 text-text-muted text-[0.72rem] tracking-[0.16em] uppercase">
-                              {documentAuthorLabel(document)}
-                            </p>
-                          </div>
-                          <h3 className="m-0 min-w-0 overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:3] [display:-webkit-box] text-[1.08rem] font-display font-semibold leading-[1.08] tracking-[-0.03em]">
+                        <div className="min-w-0 flex flex-col p-3 gap-[8px]">
+                          <p className="m-0 text-text-muted text-[0.68rem] tracking-[0.14em] uppercase truncate">
+                            {documentAuthorLabel(document)}
+                          </p>
+                          <h3 className="m-0 min-w-0 overflow-hidden [-webkit-box-orient:vertical] [-webkit-line-clamp:3] [display:-webkit-box] text-[1.02rem] font-display font-semibold leading-[1.12] tracking-[-0.03em] flex-1">
                             {document.title}
                           </h3>
-                          <div className="mt-auto pt-3 border-t border-border-subtle flex items-center justify-between gap-3 text-text-muted text-[0.72rem] tracking-[0.16em] uppercase">
-                            <span>Progress</span>
-                            <strong className="text-text-primary text-[0.95rem] font-display font-semibold tracking-[-0.02em] normal-case">
-                              {progress ? formatPercent(progressValue) : 'Not started'}
-                            </strong>
-                          </div>
-                          <div className="h-1.5 bg-white/[0.08] overflow-hidden" aria-hidden="true">
-                            <div className="h-full bg-text-primary" style={{ width: progressWidth }} />
+                          {/* Progress footer */}
+                          <div className="mt-auto pt-3 border-t border-border-subtle">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-text-muted text-[0.65rem] tracking-[0.14em] uppercase">
+                                {progress ? 'Progress' : 'Not started'}
+                              </span>
+                              {progress ? (
+                                <span className="text-text-primary text-[0.78rem] font-ui font-semibold tabular-nums tracking-[-0.01em]">
+                                  {formatPercent(progressValue)}
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="h-[2px] bg-white/[0.07]" aria-hidden="true">
+                              {progress ? <div className="h-full bg-text-primary/60 transition-[width_300ms]" style={{ width: progressWidth }} /> : null}
+                            </div>
                           </div>
                         </div>
                       </article>
@@ -1890,7 +1924,7 @@ function App() {
                   })}
                 </div>
               ) : (
-                <p className="text-text-muted pt-2">No library items match that search.</p>
+                <p className="text-text-muted pt-3 text-sm">No items match that search.</p>
               )}
             </section>
           ) : null}
@@ -1903,7 +1937,7 @@ function App() {
         >
           {/* Sidebar */}
           <aside
-            className={`sticky top-0 h-screen overflow-y-auto border-r border-border-subtle bg-[#000] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden transition-[transform,opacity,border-color] duration-[180ms] max-sm:fixed max-sm:top-0 max-sm:left-0 max-sm:bottom-0 max-sm:w-screen max-sm:h-screen max-sm:z-30 ${
+            className={`sticky top-0 h-screen overflow-y-auto overflow-x-hidden border-r border-border-subtle bg-[#000] transition-[transform,opacity,border-color] duration-[180ms] max-sm:fixed max-sm:top-0 max-sm:left-0 max-sm:bottom-0 max-sm:w-screen max-sm:h-screen max-sm:z-30 ${
               isSidebarOpen
                 ? 'max-sm:translate-x-0 max-sm:pointer-events-auto'
                 : 'translate-x-[-100%] opacity-0 pointer-events-none border-transparent max-sm:opacity-100 max-sm:border-border-subtle'
@@ -1911,16 +1945,17 @@ function App() {
           >
             <div className="min-h-full flex flex-col">
               {/* Sidebar top */}
-              <div className="px-[18px] pt-[18px] pb-[18px] border-b border-border-subtle">
-                <div className="mb-[18px] flex items-center justify-between gap-[10px]">
+              <div className="px-[18px] pt-[14px] pb-[16px] border-b border-border-subtle">
+                <div className="mb-[16px] flex items-center justify-between gap-[8px]">
                   <Button
                     variant="ghost"
+                    size="sm"
                     onClick={exitReader}
                   >
-                    <ChevronLeftIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                    <ChevronLeftIcon size={14} strokeWidth={1.9} aria-hidden="true" />
                     <span>Library</span>
                   </Button>
-                  <div className="inline-flex items-center gap-[10px]">
+                  <div className="inline-flex items-center gap-[6px]">
                     <Tooltip content="Collapse sidebar" shortcut="Mod+B" side="bottom">
                       <Button
                         variant="icon"
@@ -1929,21 +1964,56 @@ function App() {
                         onClick={() => setIsSidebarOpen(false)}
                         aria-label="Collapse sidebar"
                       >
-                        <PanelLeftCloseIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+                        <PanelLeftCloseIcon size={15} strokeWidth={1.9} aria-hidden="true" />
                       </Button>
                     </Tooltip>
                   </div>
                 </div>
-                <p className="m-0 mb-[10px] uppercase tracking-[0.18em] text-[0.68rem] text-text-muted inline-flex items-center gap-1.5">
-                  <SourceIcon sourceType={activeDocument.sourceType} size={13} strokeWidth={1.9} />
+                <p className="m-0 mb-[8px] uppercase tracking-[0.16em] text-[0.65rem] text-text-muted inline-flex items-center gap-1.5">
+                  <SourceIcon sourceType={activeDocument.sourceType} size={12} strokeWidth={1.9} />
                   {sourceLabel(activeDocument.sourceType)}
                 </p>
-                <h1 className="m-0 text-[1.65rem] font-display font-bold leading-[1.02] tracking-[-0.04em]">
-                  {activeDocument.title}
-                </h1>
-                <p className="mt-2 text-text-muted font-ui text-[0.88rem] tracking-[0.03em]">
-                  {activeDocument.author}
-                </p>
+                {isSidebarTitleEditing ? (
+                  <input
+                    ref={sidebarTitleInputRef}
+                    autoFocus
+                    value={sidebarTitleValue}
+                    onChange={(e) => setSidebarTitleValue(e.target.value)}
+                    onBlur={() => {
+                      const trimmed = sidebarTitleValue.trim()
+                      if (trimmed && trimmed !== activeDocument.title) {
+                        void handleRenameDocument(activeDocument, trimmed)
+                      }
+                      setIsSidebarTitleEditing(false)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        sidebarTitleInputRef.current?.blur()
+                      }
+                      if (e.key === 'Escape') {
+                        setSidebarTitleValue(activeDocument.title)
+                        setIsSidebarTitleEditing(false)
+                      }
+                    }}
+                    className="w-full m-0 bg-transparent text-[1.5rem] font-display font-bold leading-[1.04] tracking-[-0.04em] text-text-primary border-0 border-b border-border-strong outline-none pb-[2px]"
+                  />
+                ) : (
+                  <h1
+                    className="m-0 text-[1.5rem] font-display font-bold leading-[1.04] tracking-[-0.04em] cursor-text group"
+                    title="Click to rename"
+                    onClick={() => {
+                      setSidebarTitleValue(activeDocument.title)
+                      setIsSidebarTitleEditing(true)
+                    }}
+                  >
+                    {activeDocument.title}
+                  </h1>
+                )}
+                {activeDocument.author && documentAuthorLabel(activeDocument) !== 'Unknown author' ? (
+                  <p className="mt-[6px] text-text-muted font-ui text-[0.82rem] tracking-[0.02em]">
+                    {activeDocument.author}
+                  </p>
+                ) : null}
               </div>
 
               {/* Sidebar main */}
@@ -1976,27 +2046,31 @@ function App() {
                 </div>
 
                 {/* Progress row */}
-                <div className="flex items-center px-[18px] pb-[18px] pt-3 border-b border-border-subtle">
-                  <span className="text-text-muted text-[0.88rem] tracking-[0.03em] tabular-nums">
-                    {formatPercent(activeProgress?.progress ?? 0)}
-                  </span>
+                <div className="px-[18px] pb-[14px] pt-3 border-b border-border-subtle">
+                  <div className="flex items-center justify-between mb-[7px]">
+                    <span className="text-text-muted text-[0.65rem] tracking-[0.14em] uppercase">Reading progress</span>
+                    <span className="text-text-secondary text-[0.78rem] font-ui font-semibold tabular-nums tracking-[-0.01em]">
+                      {formatPercent(activeProgress?.progress ?? 0)}
+                    </span>
+                  </div>
+                  <div className="h-[2px] bg-white/[0.07]" aria-hidden="true">
+                    <div
+                      className="h-full bg-white/50 transition-[width] duration-300"
+                      style={{ width: `${Math.round((activeProgress?.progress ?? 0) * 100)}%` }}
+                    />
+                  </div>
                 </div>
 
                 {/* TOC panel */}
                 {visibleReaderPanel === 'toc' ? (
-                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pb-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-[18px] py-5">
-                    <div className="flex justify-between items-center gap-3 mb-4">
-                      <div className="grid gap-1">
-                        <span className="inline-flex items-center gap-1.5 text-text-muted text-[0.72rem] tracking-[0.12em] uppercase">
-                          <ListIcon size={14} strokeWidth={1.9} aria-hidden="true" />
-                          Contents
-                        </span>
-                        <h2 className="m-0 text-base font-display font-semibold tracking-[-0.03em]">
-                          Navigate the document
-                        </h2>
-                      </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-8 [scrollbar-width:thin] px-[14px] py-4">
+                    <div className="flex justify-between items-center gap-3 mb-3">
+                      <span className="inline-flex items-center gap-1.5 text-text-muted text-[0.65rem] tracking-[0.16em] uppercase font-ui font-semibold">
+                        <ListIcon size={12} strokeWidth={2} aria-hidden="true" />
+                        Contents
+                      </span>
                     </div>
-                    <div className="grid gap-2">
+                    <div className="grid gap-[2px]">
                       {tocGroups.map((group) => {
                         const isExpanded = expandedTocChapters.includes(group.chapterId)
                         const isActiveChapter =
@@ -2004,9 +2078,9 @@ function App() {
                           group.items.some((item) => item.blockId === activeProgress?.blockId)
 
                         return (
-                          <section key={group.chapterId} className="grid gap-2">
+                          <section key={group.chapterId}>
                             <button
-                              className={`w-full px-[13px] py-3 flex items-center gap-[10px] border border-border-subtle bg-white/[0.02] text-text-primary text-left transition-[border-color,background] duration-[160ms] cursor-pointer font-[inherit] outline-none hover:border-border-strong hover:bg-white/[0.04] overflow-hidden ${isActiveChapter || isExpanded ? 'border-border-strong bg-white/[0.06]' : ''}`}
+                              className={`w-full px-[12px] py-[10px] flex items-start gap-[9px] text-text-secondary text-[0.82rem] text-left transition-[background,color] duration-[140ms] cursor-pointer font-[inherit] outline-none hover:bg-white/[0.05] hover:text-text-primary ${isActiveChapter || isExpanded ? 'text-text-primary bg-white/[0.05]' : ''}`}
                               aria-expanded={isExpanded}
                               onClick={() => {
                                 if (group.items.length === 0) {
@@ -2021,28 +2095,23 @@ function App() {
                                 )
                               }}
                             >
-                              <span className="min-w-0 inline-flex items-center gap-[10px] overflow-hidden">
-                                <ChevronRightIcon
-                                  className={`shrink-0 transition-transform duration-[160ms] ${isExpanded ? 'rotate-90' : ''}`}
-                                  size={15}
-                                  strokeWidth={1.9}
-                                  aria-hidden="true"
-                                />
-                                <span className="min-w-0 truncate">{group.title}</span>
-                              </span>
+                              <ChevronRightIcon
+                                className={`shrink-0 mt-[2px] transition-transform duration-[140ms] text-text-muted ${isExpanded ? 'rotate-90' : ''}`}
+                                size={13}
+                                strokeWidth={2}
+                                aria-hidden="true"
+                              />
+                              <span className="leading-[1.45] break-words min-w-0">{group.title}</span>
                             </button>
                             {isExpanded ? (
-                              <div className="grid gap-2 ml-3 pl-3 border-l border-border-subtle">
+                              <div className="ml-[22px] border-l border-border-subtle pl-[10px]">
                                 {group.items.map((item) => (
                                   <button
                                     key={item.id}
-                                    className={`${listItemBase} ${listItemHover} flex items-center gap-[10px] ${item.level === 2 ? 'pl-3' : item.level === 3 ? 'pl-[18px]' : ''} ${activeProgress?.blockId === item.blockId ? listItemActive : ''}`}
+                                    className={`${listItemBase} ${listItemHover} text-[0.78rem] text-text-muted text-left ${item.level === 2 ? '' : item.level === 3 ? 'pl-4' : ''} ${activeProgress?.blockId === item.blockId ? listItemActive + ' text-text-primary' : ''}`}
                                     onClick={() => jumpToLocation(item.chapterId, item.blockId)}
                                   >
-                                    <span className="min-w-0 inline-flex items-center gap-[9px] overflow-hidden">
-                                      <ListIcon size={13} strokeWidth={1.9} aria-hidden="true" className="shrink-0" />
-                                      <span className="min-w-0 truncate">{item.title}</span>
-                                    </span>
+                                    <span className="leading-[1.45] break-words">{item.title}</span>
                                   </button>
                                 ))}
                               </div>
@@ -2056,24 +2125,19 @@ function App() {
 
                 {/* Notes panel */}
                 {visibleReaderPanel === 'notes' ? (
-                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pb-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-[18px] py-5">
-                    <div className="flex justify-between items-center gap-3 mb-4">
-                      <div className="grid gap-1">
-                        <span className="inline-flex items-center gap-1.5 text-text-muted text-[0.72rem] tracking-[0.12em] uppercase">
-                          <NotebookPenIcon size={14} strokeWidth={1.9} aria-hidden="true" />
-                          Notes
-                        </span>
-                        <h2 className="m-0 text-base font-display font-semibold tracking-[-0.03em]">
-                          Bookmarks and highlights
-                        </h2>
-                      </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-8 [scrollbar-width:thin] px-[14px] py-4">
+                    <div className="flex justify-between items-center gap-3 mb-3">
+                      <span className="inline-flex items-center gap-1.5 text-text-muted text-[0.65rem] tracking-[0.16em] uppercase font-ui font-semibold">
+                        <NotebookPenIcon size={12} strokeWidth={2} aria-hidden="true" />
+                        Notes
+                      </span>
                       <Button
                         variant="ghost"
                         size="sm"
                         onClick={() => setActivePanel('toc')}
                       >
-                        <XIcon size={15} strokeWidth={1.9} aria-hidden="true" />
-                        Done
+                        <XIcon size={14} strokeWidth={1.9} aria-hidden="true" />
+                        Close
                       </Button>
                     </div>
                     {/* Bookmarks */}
@@ -2188,17 +2252,30 @@ function App() {
             onKeyUp={handleSelectionChange}
           >
             {!isSidebarOpen ? (
-              <Tooltip content="Open sidebar" shortcut="Mod+B" side="right">
-                <Button
-                  variant="icon"
-                  size="md"
-                  className="fixed top-[22px] left-[22px] z-20 bg-black/[0.82] backdrop-blur-[12px] border border-border-subtle max-sm:top-4 max-sm:left-4"
-                  onClick={() => setIsSidebarOpen(true)}
-                  aria-label="Open sidebar"
-                >
-                  <PanelLeftOpenIcon size={17} strokeWidth={1.9} aria-hidden="true" />
-                </Button>
-              </Tooltip>
+              <div className="fixed top-[22px] left-[22px] z-20 flex items-center gap-2 max-sm:top-4 max-sm:left-4">
+                <Tooltip content="Back to library" side="right">
+                  <Button
+                    variant="icon"
+                    size="md"
+                    className="bg-black/[0.82] backdrop-blur-[12px] border border-border-subtle"
+                    onClick={exitReader}
+                    aria-label="Back to library"
+                  >
+                    <ChevronLeftIcon size={17} strokeWidth={1.9} aria-hidden="true" />
+                  </Button>
+                </Tooltip>
+                <Tooltip content="Open sidebar" shortcut="Mod+B" side="right">
+                  <Button
+                    variant="icon"
+                    size="md"
+                    className="bg-black/[0.82] backdrop-blur-[12px] border border-border-subtle"
+                    onClick={() => setIsSidebarOpen(true)}
+                    aria-label="Open sidebar"
+                  >
+                    <PanelLeftOpenIcon size={17} strokeWidth={1.9} aria-hidden="true" />
+                  </Button>
+                </Tooltip>
+              </div>
             ) : null}
             {/* PDF toolbar */}
             {activeDocument.sourceType === 'pdf' ? (
@@ -2278,7 +2355,7 @@ function App() {
             <div
               className={activeDocument.sourceType === 'pdf'
                 ? 'mx-auto pt-4 pb-16 px-4 max-sm:px-2'
-                : 'epub-prose w-[min(100%,var(--reader-width,840px))] mx-auto font-reading leading-[1.78] px-10 pt-8 pb-12 max-sm:px-[18px] max-sm:pb-10'}
+                : 'epub-prose w-[min(100%,var(--reader-width,840px))] mx-auto font-reading leading-[1.82] px-10 pt-8 pb-16 max-sm:px-[18px] max-sm:pb-10'}
               style={activeDocument.sourceType === 'pdf'
                 ? { width: `${Math.min(pdfZoom, 100)}%`, maxWidth: `${pdfZoom * 10}px` }
                 : readerColumnStyle}
