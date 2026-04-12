@@ -1,5 +1,5 @@
 export type AppMode = 'library' | 'reader'
-export type DocumentSource = 'pdf' | 'epub'
+export type DocumentSource = 'pdf' | 'epub' | 'url'
 export type ReadingMode = 'scroll' | 'page'
 export type ReaderBlockType = 'heading' | 'paragraph' | 'quote' | 'list' | 'code' | 'image' | 'math' | 'table' | 'pdf-page'
 
@@ -127,12 +127,15 @@ export interface AppSettings {
   aiProvider: AiProvider | null
   aiModel: string | null
   aiApiKey: string | null
+  firecrawlEnabled: boolean
+  firecrawlApiKey: string | null
 }
 
 export interface PaperMagicApi {
   loadState: () => Promise<PersistedState>
   importWithDialog: () => Promise<DocumentRecord[]>
   importPaths: (paths: string[]) => Promise<DocumentRecord[]>
+  importFromUrl: (url: string) => Promise<DocumentRecord[]>
   removeDocument: (documentId: string) => Promise<void>
   renameDocument: (documentId: string, title: string) => Promise<void>
   saveProgress: (progress: ReadingProgress) => Promise<void>

@@ -689,6 +689,8 @@ const defaultSettings: AppSettings = {
   aiProvider: null,
   aiModel: null,
   aiApiKey: null,
+  firecrawlEnabled: false,
+  firecrawlApiKey: null,
 };
 
 export function loadSettings(context: DatabaseContext): AppSettings {
@@ -707,6 +709,8 @@ export function loadSettings(context: DatabaseContext): AppSettings {
     aiProvider: (row.aiProvider as AppSettings["aiProvider"]) ?? null,
     aiModel: row.aiModel ?? null,
     aiApiKey: row.aiApiKey ?? null,
+    firecrawlEnabled: false,
+    firecrawlApiKey: null,
   };
 }
 
@@ -736,4 +740,3 @@ export function saveSettings(
 
   return settings;
 }
-

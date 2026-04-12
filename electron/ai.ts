@@ -1,5 +1,3 @@
-import type { AppSettings } from "../src/types";
-
 export type AiProvider = "google" | "openai" | "anthropic";
 
 export interface ProviderModel {
@@ -108,9 +106,6 @@ export async function validateApiKey(
 }
 
 // Kept for potential future use; not called by current importers
-export async function generateDocumentTitle(
-  _contentSample: string,
-  _settings: AppSettings,
-): Promise<string | null> {
+export async function generateDocumentTitle(): Promise<string | null> {
   return null;
 }

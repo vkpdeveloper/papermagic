@@ -78,6 +78,8 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
         aiProvider: null,
         aiModel: null,
         aiApiKey: null,
+        firecrawlEnabled: false,
+        firecrawlApiKey: null,
     })
     const [isLoading, setIsLoading] = useState(true)
     const [isSaving, setIsSaving] = useState(false)
@@ -152,6 +154,10 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
     const handleSave = useCallback(async () => {
         if (settings.aiEnabled && !settings.aiApiKey) {
             toast.error('API key required', { description: 'Enter your API key before saving.' })
+            return
+        }
+        if (settings.firecrawlEnabled && !settings.firecrawlApiKey) {
+            toast.error('Firecrawl API key required', { description: 'Enter your Firecrawl API key or disable Firecrawl fallback.' })
             return
         }
         setIsSaving(true)
@@ -281,6 +287,60 @@ export function SettingsPage({ open, onClose }: SettingsPageProps) {
                                 )}
                             </>
                         )}
+                    </div>
+
+                    {/* ── URL Reader / Firecrawl ───────────────────── */}
+                    <div className="pt-4 border-t border-border-subtle">
+                        <h3 className="m-0 text-sm font-semibold text-text-primary">URL Reader Fallback</h3>
+                        <p className="mt-1 text-xs text-text-muted leading-relaxed">
+                            When direct fetch and headless browser extraction fail, optionally use Firecrawl markdown extraction.
+                        </p>
+                    </div>
+
+                    <div className="grid gap-5">
+                        <div className="flex items-center justify-between gap-4">
+                            <div>
+                                <p className="m-0 text-sm text-text-primary">Enable Firecrawl fallback</p>
+                                <p className="m-0 mt-0.5 text-xs text-text-muted">Used only for URL import fallback.</p>
+                            </div>
+                            <Toggle
+                                checked={settings.firecrawlEnabled}
+                                onChange={(enabled) => setSettings((prev) => ({
+                                    ...prev,
+                                    firecrawlEnabled: enabled,
+                                    firecrawlApiKey: enabled ? prev.firecrawlApiKey : null,
+                                }))}
+                            />
+                        </div>
+
+                        {settings.firecrawlEnabled ? (
+                            <div className="grid gap-2">
+                                <label className="text-sm text-text-primary">Firecrawl API Key</label>
+                                <Input
+                                    variant="mono"
+                                    size="md"
+                                    type={showKey ? 'text' : 'password'}
+                                    value={settings.firecrawlApiKey ?? ''}
+                                    onChange={(e) => {
+                                        setSettings((prev) => ({ ...prev, firecrawlApiKey: e.target.value || null }))
+                                    }}
+                                    placeholder="fc-…"
+                                    suffix={
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowKey((v) => !v)}
+                                            className="text-text-muted hover:text-text-secondary transition-colors duration-150 bg-transparent border-0 p-0 cursor-pointer"
+                                            aria-label={showKey ? 'Hide key' : 'Show key'}
+                                        >
+                                            {showKey ? <EyeOffIcon size={13} /> : <EyeIcon size={13} />}
+                                        </button>
+                                    }
+                                    spellCheck={false}
+                                    autoComplete="off"
+                                />
+                                <p className="m-0 text-xs text-text-muted">Get key at firecrawl.dev</p>
+                            </div>
+                        ) : null}
                     </div>
 
                     <div className="flex justify-end gap-3 mt-auto pt-4 border-t border-border-subtle">

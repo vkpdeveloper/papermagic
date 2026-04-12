@@ -5,6 +5,7 @@ const api: PaperMagicApi = {
   loadState: () => ipcRenderer.invoke('paper:load-state'),
   importWithDialog: () => ipcRenderer.invoke('paper:import-with-dialog'),
   importPaths: (paths) => ipcRenderer.invoke('paper:import-paths', paths),
+  importFromUrl: (url) => ipcRenderer.invoke('paper:import-url', url),
   removeDocument: (documentId) => ipcRenderer.invoke('paper:remove-document', documentId),
   renameDocument: (documentId, title) => ipcRenderer.invoke('paper:rename-document', documentId, title),
   saveProgress: (progress) => ipcRenderer.invoke('paper:save-progress', progress),

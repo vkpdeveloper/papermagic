@@ -9,23 +9,23 @@ import {
   buildHighlight,
   createDatabaseContext,
   findExistingDocumentBySource,
-  loadSettings,
   loadState,
   removeBookmark,
   removeDocument,
   removeHighlight,
   savePreferences,
   saveProgress,
-  saveSettings,
   upsertDocument,
 } from './database'
-import { importDocumentFromPath } from './importers'
+import { importDocumentFromPath, importDocumentFromUrl } from './importers'
 import { validateApiKey, PROVIDER_MODELS } from './ai'
 import type { AiProvider } from './ai'
+import { ensureSettingsFile, loadSettingsFromFile, saveSettingsToFile } from './settings'
 
 export interface LibraryStore {
   loadState: () => Promise<PersistedState>
   importPaths: (paths: string[]) => Promise<DocumentRecord[]>
+  importFromUrl: (url: string) => Promise<DocumentRecord[]>
   removeDocument: (documentId: string) => Promise<void>
   renameDocument: (documentId: string, title: string) => Promise<void>
   saveProgress: (progress: ReadingProgress) => Promise<void>
@@ -53,10 +53,21 @@ function resolveDocumentCacheDirectory(document: DocumentRecord, libraryRoot: st
   return resolvedCandidate
 }
 
+function normalizeSourceUrl(value: string): string {
+  try {
+    const parsed = new URL(value.trim())
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return value.trim()
+  }
+}
+
 export function createLibraryStore(
   userDataPath: string,
   options?: { onDocumentUpdate?: (doc: DocumentRecord) => void },
 ): LibraryStore {
+  ensureSettingsFile()
   const context = createDatabaseContext(userDataPath)
 
   const repairUnreadableDocuments = async (): Promise<void> => {
@@ -153,6 +164,25 @@ export function createLibraryStore(
 
       return importedDocuments
     },
+    importFromUrl: async (url) => {
+      const normalizedUrl = normalizeSourceUrl(url)
+      if (!normalizedUrl) {
+        return []
+      }
+
+      const existingDocumentId = findExistingDocumentBySource(context, undefined, normalizedUrl)
+      if (existingDocumentId) {
+        return []
+      }
+
+      const settings = await loadSettingsFromFile()
+      const importedDocument = await importDocumentFromUrl(normalizedUrl, context.libraryRoot, {
+        firecrawlEnabled: settings.firecrawlEnabled,
+        firecrawlApiKey: settings.firecrawlApiKey,
+      })
+      upsertDocument(context, importedDocument)
+      return [importedDocument]
+    },
     removeDocument: async (documentId) => {
       const state = loadState(context)
       const document = state.documents.find((entry) => entry.id === documentId)
@@ -192,10 +222,9 @@ export function createLibraryStore(
     removeBookmark: async (bookmarkId) => {
       removeBookmark(context, bookmarkId)
     },
-    loadSettings: async () => loadSettings(context),
-    saveSettings: async (settings) => saveSettings(context, settings),
+    loadSettings: async () => loadSettingsFromFile(),
+    saveSettings: async (settings) => saveSettingsToFile(settings),
     validateApiKey: async (provider, apiKey, modelId) => validateApiKey(provider, apiKey, modelId),
     getProviderModels: async (provider) => PROVIDER_MODELS[provider] ?? [],
   }
 }
-

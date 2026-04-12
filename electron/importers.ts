@@ -5,10 +5,18 @@ import JSZip from 'jszip'
 import { parseHTML } from 'linkedom'
 import { XMLParser } from 'fast-xml-parser'
 import mupdf from 'mupdf'
+import TurndownService from 'turndown'
+import * as TurndownPluginGfm from 'turndown-plugin-gfm'
+import { JSDOM } from 'jsdom'
+import { Readability } from '@mozilla/readability'
+import { chromium } from 'playwright'
+import Firecrawl from '@mendable/firecrawl-js'
 import {
   UNREADABLE_IMPORT_MESSAGE,
   buildDocument,
   createId,
+  extractTitleFromMarkdown,
+  markdownToBlocks,
   splitBlocksIntoChapters,
 } from '../src/content'
 import type { Chapter, DocumentRecord, ReaderBlock } from '../src/types'
@@ -28,6 +36,211 @@ function toArray<T>(value: T | T[] | undefined): T[] {
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
+}
+
+const WEB_REQUEST_TIMEOUT_MS = 25_000
+const BROWSER_REQUEST_TIMEOUT_MS = 45_000
+const WEB_MIN_MARKDOWN_CHARS = 380
+const WEB_DESKTOP_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+function normalizeSourceUrl(value: string): string {
+  const parsed = new URL(value.trim())
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Only HTTP and HTTPS URLs are supported.')
+  }
+  parsed.hash = ''
+  return parsed.toString()
+}
+
+function fallbackTitleFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    const slug = parsed.pathname.split('/').filter(Boolean).pop()
+    if (slug) {
+      return friendlyFilenameTitle(slug)
+    }
+    return parsed.hostname.replace(/^www\./i, '')
+  } catch {
+    return 'Web Article'
+  }
+}
+
+function absolutizeUrl(candidate: string, baseUrl: string): string {
+  try {
+    return new URL(candidate, baseUrl).toString()
+  } catch {
+    return candidate
+  }
+}
+
+function htmlToMarkdown(html: string): string {
+  const turndown = new TurndownService({
+    headingStyle: 'atx',
+    codeBlockStyle: 'fenced',
+    emDelimiter: '*',
+    bulletListMarker: '-',
+    linkStyle: 'inlined',
+    strongDelimiter: '**',
+  })
+
+  turndown.remove(['script', 'style', 'noscript', 'iframe'])
+  turndown.remove((node) => node.nodeName === 'SVG')
+  turndown.keep(['sub', 'sup'])
+  turndown.use(TurndownPluginGfm.gfm)
+
+  return turndown
+    .turndown(html)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+interface ParsedWebArticle {
+  title: string
+  author: string
+  markdown: string
+  excerpt?: string
+  coverImageUrl?: string
+}
+
+function parseWebArticleFromHtml(html: string, sourceUrl: string): ParsedWebArticle {
+  const dom = new JSDOM(html, { url: sourceUrl })
+  const doc = dom.window.document
+  const readability = new Readability(doc.cloneNode(true) as Document, {
+    charThreshold: 220,
+    keepClasses: false,
+  })
+  const article = readability.parse()
+  const articleHtml =
+    article?.content ??
+    doc.querySelector('article, main, [role="main"], body')?.innerHTML ??
+    ''
+  const markdown = htmlToMarkdown(articleHtml)
+
+  const title =
+    normalizeWhitespace(
+      article?.title ??
+      doc.querySelector('meta[property="og:title"]')?.getAttribute('content') ??
+      doc.title ??
+      '',
+    ) || fallbackTitleFromUrl(sourceUrl)
+  const author =
+    normalizeWhitespace(
+      article?.byline ??
+      doc.querySelector('meta[name="author"]')?.getAttribute('content') ??
+      doc.querySelector('meta[property="article:author"]')?.getAttribute('content') ??
+      '',
+    ) || 'Web import'
+  const coverImageUrl = normalizeWhitespace(
+    doc.querySelector('meta[property="og:image"]')?.getAttribute('content') ??
+    doc.querySelector('meta[name="twitter:image"]')?.getAttribute('content') ??
+    '',
+  )
+
+  return {
+    title,
+    author,
+    markdown,
+    excerpt: article?.excerpt ?? undefined,
+    coverImageUrl: coverImageUrl ? absolutizeUrl(coverImageUrl, sourceUrl) : undefined,
+  }
+}
+
+function isReadableMarkdown(markdown: string): boolean {
+  return markdown.length >= WEB_MIN_MARKDOWN_CHARS || markdown.split(/\s+/).filter(Boolean).length >= 90
+}
+
+async function fetchHtmlWithTimeout(url: string): Promise<string> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), WEB_REQUEST_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'user-agent': WEB_DESKTOP_USER_AGENT,
+        'accept-language': 'en-US,en;q=0.9',
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    return await response.text()
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+async function fetchRenderedHtmlWithBrowser(url: string): Promise<{ html: string; finalUrl: string }> {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
+  })
+
+  try {
+    const context = await browser.newContext({
+      userAgent: WEB_DESKTOP_USER_AGENT,
+      locale: 'en-US',
+      timezoneId: 'America/New_York',
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    })
+    const page = await context.newPage()
+
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
+      Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' })
+    })
+
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: BROWSER_REQUEST_TIMEOUT_MS })
+    await page.waitForTimeout(1_200)
+    await page.mouse.move(320, 260, { steps: 18 })
+    await page.mouse.wheel(0, 520)
+    await page.waitForTimeout(700)
+    await page.evaluate(() => {
+      window.scrollBy(0, Math.floor(window.innerHeight * 0.75))
+    })
+    await page.waitForTimeout(900)
+
+    const html = await page.content()
+    const finalUrl = page.url()
+    await context.close()
+    return { html, finalUrl }
+  } finally {
+    await browser.close()
+  }
+}
+
+async function fetchMarkdownFromFirecrawl(url: string, apiKey: string): Promise<ParsedWebArticle> {
+  const client = new Firecrawl({ apiKey })
+  const scraped = await client.scrape(url, {
+    formats: ['markdown'],
+    onlyMainContent: true,
+  })
+  const markdown = (scraped.markdown ?? '').trim()
+  if (!markdown) {
+    throw new Error('Firecrawl did not return markdown content.')
+  }
+
+  const title = normalizeWhitespace(scraped.metadata?.title ?? '') || extractTitleFromMarkdown(markdown, fallbackTitleFromUrl(url))
+  const author = 'Web import'
+  const coverImageUrl = normalizeWhitespace(scraped.metadata?.ogImage?.toString() ?? '')
+
+  return {
+    title,
+    author,
+    markdown,
+    coverImageUrl: coverImageUrl || undefined,
+    excerpt: normalizeWhitespace(scraped.metadata?.description?.toString() ?? '') || undefined,
+  }
 }
 
 export function friendlyFilenameTitle(filename: string): string {
@@ -393,7 +606,12 @@ export async function importPdfAsImages(
   const buildCurrentDoc = () => {
     const chapters = streamChapters
       .filter((c) => c.content.length > 0)
-      .map(({ startPage: _startPage, ...c }) => c)
+      .map((chapter) => ({
+        id: chapter.id,
+        title: chapter.title,
+        content: chapter.content,
+        outlineDepth: chapter.outlineDepth,
+      }))
     return buildDocument({
       id: docId,
       title,
@@ -1053,6 +1271,96 @@ async function importEpub(filePath: string, cacheDirectory: string): Promise<Doc
   })
 }
 
+export async function importDocumentFromUrl(
+  rawUrl: string,
+  libraryRoot: string,
+  options?: { documentId?: string; firecrawlEnabled?: boolean; firecrawlApiKey?: string | null },
+): Promise<DocumentRecord> {
+  const normalizedUrl = normalizeSourceUrl(rawUrl)
+  const documentId = options?.documentId ?? createId('document')
+  const cacheDirectory = await createCacheDirectory(libraryRoot, documentId)
+  const warnings: string[] = []
+  const attemptErrors: string[] = []
+
+  let article: ParsedWebArticle | null = null
+  let extractedWith = ''
+
+  try {
+    const html = await fetchHtmlWithTimeout(normalizedUrl)
+    const parsed = parseWebArticleFromHtml(html, normalizedUrl)
+    if (isReadableMarkdown(parsed.markdown)) {
+      article = parsed
+      extractedWith = 'Direct fetch + Readability + Turndown'
+    } else {
+      attemptErrors.push('Direct fetch produced low-density content.')
+    }
+  } catch (error) {
+    attemptErrors.push(`Direct fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
+  }
+
+  if (!article) {
+    try {
+      const rendered = await fetchRenderedHtmlWithBrowser(normalizedUrl)
+      const parsed = parseWebArticleFromHtml(rendered.html, rendered.finalUrl)
+      if (isReadableMarkdown(parsed.markdown)) {
+        article = parsed
+        extractedWith = 'Headless Chromium + Readability + Turndown'
+      } else {
+        attemptErrors.push('Headless browser produced low-density content.')
+      }
+    } catch (error) {
+      attemptErrors.push(`Headless browser failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    }
+  }
+
+  const firecrawlApiKey = options?.firecrawlApiKey?.trim() ?? ''
+  const canUseFirecrawl = Boolean(options?.firecrawlEnabled && firecrawlApiKey)
+
+  if (!article && canUseFirecrawl) {
+    try {
+      article = await fetchMarkdownFromFirecrawl(normalizedUrl, firecrawlApiKey)
+      extractedWith = 'Firecrawl markdown scrape'
+    } catch (error) {
+      attemptErrors.push(`Firecrawl failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    }
+  }
+
+  if (!article) {
+    throw new Error(`Could not extract readable content from URL. ${attemptErrors.join(' ')}`)
+  }
+
+  const markdown = article.markdown.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+  const markdownFilePath = path.join(cacheDirectory, 'source.md')
+  await fs.writeFile(markdownFilePath, markdown, 'utf8')
+
+  if (attemptErrors.length > 0) {
+    warnings.push(...attemptErrors)
+  }
+
+  const title = article.title || extractTitleFromMarkdown(markdown, fallbackTitleFromUrl(normalizedUrl))
+  const blocks = markdownToBlocks(markdown)
+  const readableBlocks = ensureReadableBlocks(blocks, title)
+  const chapters = splitBlocksIntoChapters(title, readableBlocks)
+
+  return buildDocument({
+    id: documentId,
+    title,
+    author: article.author || 'Web import',
+    description: article.excerpt || 'Web article imported from URL.',
+    sourceType: 'url',
+    preferredMode: 'page',
+    originLabel: normalizedUrl,
+    extractedWith,
+    chapters,
+    metadata: {
+      coverImageUrl: article.coverImageUrl,
+      cacheDirectory,
+      warnings,
+      note: `Imported from ${normalizedUrl}`,
+    },
+  })
+}
+
 
 export async function importDocumentFromPath(
   filePath: string,
@@ -1073,4 +1381,3 @@ export async function importDocumentFromPath(
 
   throw new Error(`Unsupported file type: ${extension}`)
 }
-

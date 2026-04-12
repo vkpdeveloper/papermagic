@@ -33,6 +33,7 @@ import {
   Sun as SunIcon,
   RotateCcw as FitWidthIcon,
   Clock as ClockIcon,
+  Globe as GlobeIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { buildSearchResults, isUtilityHeading } from './content'
@@ -51,6 +52,7 @@ import { Streamdown, type ThemeInput } from 'streamdown'
 import { createMathPlugin } from '@streamdown/math'
 import { createCodePlugin } from '@streamdown/code'
 import { createCjkPlugin } from '@streamdown/cjk'
+import { createMermaidPlugin } from '@streamdown/mermaid'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { Dialog } from './components/ui/Dialog'
 import { DropOverlay } from './components/DropOverlay'
@@ -199,13 +201,15 @@ function sourceLabel(sourceType: DocumentRecord['sourceType']): string {
       return 'EPUB'
     case 'pdf':
       return 'PDF'
+    case 'url':
+      return 'URL'
     default:
       return 'URL'
   }
 }
 
 function documentAuthorLabel(document: DocumentRecord): string {
-  const placeholderAuthors = new Set(['PDF import', 'EPUB import'])
+  const placeholderAuthors = new Set(['PDF import', 'EPUB import', 'Web import'])
   return placeholderAuthors.has(document.author) ? 'Unknown author' : document.author
 }
 
@@ -215,7 +219,7 @@ function SourceIcon(props: {
   strokeWidth?: number
 }) {
   const { sourceType, size = 16, strokeWidth = 1.8 } = props
-  const Icon = sourceType === 'epub' ? BookOpenIcon : FileTextIcon
+  const Icon = sourceType === 'epub' ? BookOpenIcon : sourceType === 'pdf' ? FileTextIcon : GlobeIcon
   return <Icon size={size} strokeWidth={strokeWidth} aria-hidden="true" />
 }
 
@@ -346,9 +350,10 @@ const sdPlugins = {
   math: createMathPlugin({ singleDollarTextMath: true }),
   code: createCodePlugin({ themes: SD_SHIKI_THEME }),
   cjk: createCjkPlugin(),
+  mermaid: createMermaidPlugin(),
 }
 
-const sdAllPlugins = { math: sdPlugins.math, code: sdPlugins.code, cjk: sdPlugins.cjk }
+const sdAllPlugins = { math: sdPlugins.math, code: sdPlugins.code, cjk: sdPlugins.cjk, mermaid: sdPlugins.mermaid }
 const sdCodePlugins = { code: sdPlugins.code, cjk: sdPlugins.cjk }
 const sdMathPlugins = { math: sdPlugins.math }
 
@@ -708,6 +713,8 @@ function App() {
   const [persistedState, setPersistedState] = useState<PersistedState | null>(null)
   const [mode, setMode] = useState<AppMode>('library')
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [isUrlDialogOpen, setIsUrlDialogOpen] = useState(false)
+  const [urlInput, setUrlInput] = useState('')
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null)
   const [activePanel, setActivePanel] = useState<ReaderPanel>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
@@ -1070,6 +1077,34 @@ function App() {
     }
   }
 
+  const handleUrlImport = async () => {
+    const normalized = urlInput.trim()
+    if (!normalized) {
+      toast.error('Enter a URL to import.')
+      return
+    }
+
+    setIsImporting(true)
+
+    try {
+      const importedDocuments = await window.paperMagic.importFromUrl(normalized)
+      mergeImportedDocuments(
+        importedDocuments,
+        importedDocuments.length > 0
+          ? 'Imported URL into the library.'
+          : 'That URL is already in your library.',
+      )
+      if (importedDocuments.length > 0) {
+        setIsUrlDialogOpen(false)
+        setUrlInput('')
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'The URL could not be imported.')
+    } finally {
+      setIsImporting(false)
+    }
+  }
+
   const handleFilesSelected = async (files: FileList | null) => {
     if (!files || files.length === 0) {
       return
@@ -1126,7 +1161,7 @@ function App() {
     })
   }
 
-  const jumpToLocation = (chapterId: string, blockId: string) => {
+  const jumpToLocation = useCallback((chapterId: string, blockId: string) => {
     if (!activeDocument || !readerRef.current) {
       return
     }
@@ -1154,7 +1189,7 @@ function App() {
       readingMode: 'scroll',
       lastOpenedAt: new Date().toISOString(),
     })
-  }
+  }, [activeDocument, activeProgress?.progress, queueProgressSave])
 
   const handleRemoveDocument = async (document: DocumentRecord) => {
     if (!persistedState || deletingDocumentIds.includes(document.id)) {
@@ -1664,7 +1699,7 @@ function App() {
     if (result) {
       jumpToLocation(result.chapterId, result.blockId)
     }
-  }, [searchResultIndex, isReaderSearchOpen, searchResults])
+  }, [searchResultIndex, isReaderSearchOpen, searchResults, jumpToLocation])
 
   useEffect(() => {
     if (isReaderSearchOpen) {
@@ -1769,6 +1804,17 @@ function App() {
                 Import
               </Button>
               <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => setIsUrlDialogOpen(true)}
+                disabled={isImporting}
+                aria-label="Import from URL"
+              >
+                <GlobeIcon size={13} strokeWidth={2} aria-hidden="true" />
+                URL
+              </Button>
+              <Button
                 variant="icon"
                 size="md"
                 className="border border-border-subtle"
@@ -1789,17 +1835,28 @@ function App() {
                 No documents yet.
               </h2>
               <p className="max-w-[38ch] text-text-muted leading-[1.6] mb-6">
-                Import a PDF or EPUB to begin. Your library stays offline — nothing leaves your machine.
+                Import a PDF, EPUB, or URL to begin. Your library stays offline except optional web fetches for URL imports.
               </p>
-              <Button
-                variant="secondary"
-                size="md"
-                onClick={() => void handleImportDialog()}
-                disabled={isImporting}
-              >
-                {isImporting ? <Spinner className="size-4" /> : <UploadIcon size={15} strokeWidth={1.9} aria-hidden="true" />}
-                Import file
-              </Button>
+              <div className="flex items-center gap-2 max-sm:flex-col max-sm:items-stretch">
+                <Button
+                  variant="secondary"
+                  size="md"
+                  onClick={() => void handleImportDialog()}
+                  disabled={isImporting}
+                >
+                  {isImporting ? <Spinner className="size-4" /> : <UploadIcon size={15} strokeWidth={1.9} aria-hidden="true" />}
+                  Import file
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="md"
+                  onClick={() => setIsUrlDialogOpen(true)}
+                  disabled={isImporting}
+                >
+                  <GlobeIcon size={15} strokeWidth={1.9} aria-hidden="true" />
+                  Import URL
+                </Button>
+              </div>
             </section>
           ) : null}
 
@@ -2452,6 +2509,52 @@ function App() {
       {confirmDialog ? (
         <ConfirmDialog dialog={confirmDialog} onDismiss={() => setConfirmDialog(null)} />
       ) : null}
+
+      <Dialog
+        open={isUrlDialogOpen}
+        onOpenChange={(open) => {
+          setIsUrlDialogOpen(open)
+          if (!open) {
+            setUrlInput('')
+          }
+        }}
+        title="Import from URL"
+        description="Paste a blog/article URL. Paper Magic will extract a reader-friendly Markdown version."
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            void handleUrlImport()
+          }}
+          className="grid gap-4"
+        >
+          <Input
+            autoFocus
+            value={urlInput}
+            onChange={(event) => setUrlInput(event.target.value)}
+            placeholder="https://example.com/article"
+          />
+          <div className="flex justify-end gap-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="md"
+              onClick={() => setIsUrlDialogOpen(false)}
+              disabled={isImporting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              size="md"
+              loading={isImporting}
+            >
+              Import URL
+            </Button>
+          </div>
+        </form>
+      </Dialog>
 
       {renameDialog ? (
         <Dialog

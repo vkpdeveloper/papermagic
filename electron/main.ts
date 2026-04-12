@@ -64,6 +64,7 @@ function registerIpcHandlers() {
     return requireStore().importPaths(result.filePaths)
   })
   ipcMain.handle('paper:import-paths', (_event, paths: string[]) => requireStore().importPaths(paths))
+  ipcMain.handle('paper:import-url', (_event, url: string) => requireStore().importFromUrl(url))
   ipcMain.handle('paper:remove-document', (_event, documentId: string) => requireStore().removeDocument(documentId))
   ipcMain.handle('paper:rename-document', (_event, documentId: string, title: string) => requireStore().renameDocument(documentId, title))
   ipcMain.handle('paper:save-progress', (_event, progress) => requireStore().saveProgress(progress))
