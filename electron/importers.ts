@@ -95,6 +95,87 @@ function htmlToMarkdown(html: string): string {
     .trim()
 }
 
+function pickBestImageSource(img: Element): string {
+  const get = (attr: string) => normalizeWhitespace(img.getAttribute(attr) ?? '')
+
+  const direct = get('src')
+  if (direct && !direct.startsWith('data:')) {
+    return direct
+  }
+
+  const lazyCandidates = [
+    'data-src',
+    'data-original',
+    'data-lazy-src',
+    'data-url',
+    'data-image',
+    'data-fallback-src',
+  ]
+  for (const attr of lazyCandidates) {
+    const value = get(attr)
+    if (value && !value.startsWith('data:')) {
+      return value
+    }
+  }
+
+  const srcset = get('srcset') || get('data-srcset')
+  if (srcset) {
+    const first = srcset
+      .split(',')
+      .map((entry) => normalizeWhitespace(entry.split(/\s+/)[0] ?? ''))
+      .find(Boolean)
+    if (first && !first.startsWith('data:')) {
+      return first
+    }
+  }
+
+  return direct
+}
+
+function absolutizeMediaUrlsInHtml(html: string, baseUrl: string): string {
+  const dom = new JSDOM(html, { url: baseUrl })
+  const { document } = dom.window
+
+  document.querySelectorAll('img').forEach((img) => {
+    const src = pickBestImageSource(img)
+    if (src) {
+      img.setAttribute('src', absolutizeUrl(src, baseUrl))
+    }
+  })
+
+  document.querySelectorAll('source').forEach((source) => {
+    const srcset = normalizeWhitespace(source.getAttribute('srcset') ?? '')
+    if (!srcset) {
+      return
+    }
+    const rewritten = srcset
+      .split(',')
+      .map((entry) => {
+        const parts = normalizeWhitespace(entry).split(/\s+/)
+        if (parts.length === 0) {
+          return ''
+        }
+        const src = absolutizeUrl(parts[0], baseUrl)
+        return [src, ...parts.slice(1)].join(' ')
+      })
+      .filter(Boolean)
+      .join(', ')
+    if (rewritten) {
+      source.setAttribute('srcset', rewritten)
+    }
+  })
+
+  document.querySelectorAll('a[href]').forEach((anchor) => {
+    const href = normalizeWhitespace(anchor.getAttribute('href') ?? '')
+    if (!href) {
+      return
+    }
+    anchor.setAttribute('href', absolutizeUrl(href, baseUrl))
+  })
+
+  return document.body?.innerHTML ?? html
+}
+
 interface ParsedWebArticle {
   title: string
   author: string
@@ -111,10 +192,11 @@ function parseWebArticleFromHtml(html: string, sourceUrl: string): ParsedWebArti
     keepClasses: false,
   })
   const article = readability.parse()
-  const articleHtml =
+  const articleHtmlRaw =
     article?.content ??
     doc.querySelector('article, main, [role="main"], body')?.innerHTML ??
     ''
+  const articleHtml = absolutizeMediaUrlsInHtml(articleHtmlRaw, sourceUrl)
   const markdown = htmlToMarkdown(articleHtml)
 
   const title =
