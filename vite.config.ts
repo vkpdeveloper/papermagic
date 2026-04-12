@@ -6,13 +6,23 @@ import tailwindcss from '@tailwindcss/vite'
 
 const electronRuntimeDependencies = [
   '@hyzyla/pdfium',
+  '@mendable/firecrawl-js',
+  '@mozilla/readability',
   'better-sqlite3',
+  'chromium-bidi',
+  'devtools-protocol',
   'drizzle-orm',
   'drizzle-orm/better-sqlite3',
   'fast-xml-parser',
+  'jsdom',
   'jszip',
   'linkedom',
   'mupdf',
+  'playwright',
+  'playwright-core',
+  'turndown',
+  'turndown-plugin-gfm',
+  'undici',
   'web-tree-sitter',
 ]
 

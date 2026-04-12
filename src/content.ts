@@ -26,6 +26,37 @@ function normalizeLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
 
+function parseInlineMarkdownImage(line: string): { alt: string; src: string } | null {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('![')) {
+    return null
+  }
+
+  const altEnd = trimmed.indexOf('](')
+  if (altEnd < 2 || !trimmed.endsWith(')')) {
+    return null
+  }
+
+  const alt = trimmed.slice(2, altEnd)
+  const rawDestination = trimmed.slice(altEnd + 2, -1).trim()
+  if (!rawDestination) {
+    return null
+  }
+
+  // Support `<url>` destination form.
+  if (rawDestination.startsWith('<') && rawDestination.endsWith('>')) {
+    const src = rawDestination.slice(1, -1).trim()
+    return src ? { alt, src } : null
+  }
+
+  // Support optional title syntax: (url "title"), (url 'title'), (url (title))
+  // We only need the first URL token for image rendering.
+  const firstSpace = rawDestination.search(/\s/)
+  const srcCandidate = (firstSpace === -1 ? rawDestination : rawDestination.slice(0, firstSpace)).trim()
+
+  return srcCandidate ? { alt, src: srcCandidate } : null
+}
+
 export function isUtilityHeading(text: string): boolean {
   const normalized = normalizeLine(text)
   return /^\d{1,3}$/.test(normalized)
@@ -329,17 +360,16 @@ export function markdownToBlocks(markdown: string): ReaderBlock[] {
       continue
     }
 
-    const imageMatch = trimmed.match(/^!\[(.*?)\]\((.+?)\)$/)
-
-    if (imageMatch) {
+    const parsedImage = parseInlineMarkdownImage(trimmed)
+    if (parsedImage) {
       flushParagraph()
       flushList()
       blocks.push({
         id: createId('block'),
         type: 'image',
-        alt: imageMatch[1] || 'Imported image',
-        caption: imageMatch[1] || undefined,
-        src: imageMatch[2],
+        alt: parsedImage.alt || 'Imported image',
+        caption: parsedImage.alt || undefined,
+        src: parsedImage.src,
       })
       continue
     }
